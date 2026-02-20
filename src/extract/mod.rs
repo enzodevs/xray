@@ -1,7 +1,13 @@
+mod calls;
+mod hooks;
+mod jsx;
+mod tests_block;
+mod types;
+
 use tree_sitter::Node;
 
-use crate::model::{FileSymbols, Hook, ReExport, Symbol, TestBlock, TypeDef};
-use crate::util::{compress_members, is_noise, trim_quotes, txt};
+use crate::model::{FileSymbols, Hook, ReExport, Symbol};
+use crate::util::{trim_quotes, txt};
 
 /// Walk top-level children of the AST root and extract all symbols.
 pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
@@ -33,7 +39,7 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
                 extract_class(node, src, &mut symbols.internals);
             }
             "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
-                if let Some(t) = extract_type_def(node, src, false) {
+                if let Some(t) = types::extract_type_def(node, src, false) {
                     symbols.types.push(t);
                 }
             }
@@ -47,7 +53,7 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
                 );
             }
             "expression_statement" => {
-                if let Some(tb) = extract_test_block(node, src) {
+                if let Some(tb) = tests_block::extract_test_block(node, src) {
                     symbols.tests.push(tb);
                 }
             }
@@ -93,13 +99,22 @@ fn extract_function(node: Node, src: &[u8]) -> Option<Symbol> {
     }
 
     let body = node.child_by_field_name("body");
-    let is_component = returns_jsx(body);
-    let calls = extract_calls(body, src);
+    let is_component = jsx::returns_jsx(body);
+    let calls = calls::extract_calls(body, src);
     let renders = if is_component {
-        extract_jsx_components(body, src)
+        jsx::extract_jsx_components(body, src)
     } else {
         Vec::new()
     };
+
+    let (hooks, handlers) = if is_component {
+        body.map_or_else(Default::default, |b| {
+            hooks::extract_body_hooks_and_handlers(b, src)
+        })
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let calls = hooks::filter_hook_calls(calls, &hooks);
 
     Some(Symbol {
         signature: sig,
@@ -108,6 +123,8 @@ fn extract_function(node: Node, src: &[u8]) -> Option<Symbol> {
         calls,
         is_component,
         renders,
+        hooks,
+        handlers,
     })
 }
 
@@ -127,13 +144,22 @@ fn extract_arrow(declarator: Node, src: &[u8]) -> Option<Symbol> {
     let sig = format!("{prefix}{name} = {arrow_sig}");
 
     let body = value.child_by_field_name("body");
-    let is_component = returns_jsx(body);
-    let calls = extract_calls(body, src);
+    let is_component = jsx::returns_jsx(body);
+    let calls = calls::extract_calls(body, src);
     let renders = if is_component {
-        extract_jsx_components(body, src)
+        jsx::extract_jsx_components(body, src)
     } else {
         Vec::new()
     };
+
+    let (hooks, handlers) = if is_component {
+        body.map_or_else(Default::default, |b| {
+            hooks::extract_body_hooks_and_handlers(b, src)
+        })
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let calls = hooks::filter_hook_calls(calls, &hooks);
 
     Some(Symbol {
         signature: sig,
@@ -142,6 +168,8 @@ fn extract_arrow(declarator: Node, src: &[u8]) -> Option<Symbol> {
         calls,
         is_component,
         renders,
+        hooks,
+        handlers,
     })
 }
 
@@ -165,7 +193,7 @@ fn process_export(node: Node, src: &[u8], symbols: &mut FileSymbols) {
                 extract_class(child, src, &mut symbols.exports);
             }
             "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
-                if let Some(t) = extract_type_def(child, src, true) {
+                if let Some(t) = types::extract_type_def(child, src, true) {
                     symbols.types.push(t);
                 }
             }
@@ -228,6 +256,8 @@ fn extract_class(node: Node, src: &[u8], symbols: &mut Vec<Symbol>) {
         calls: Vec::new(),
         is_component: false,
         renders: Vec::new(),
+        hooks: Vec::new(),
+        handlers: Vec::new(),
     });
 
     if let Some(body) = node.child_by_field_name("body") {
@@ -252,7 +282,7 @@ fn process_lexical(
     src: &[u8],
     exported: bool,
     symbols: &mut Vec<Symbol>,
-    mut hooks: Option<&mut Vec<Hook>>,
+    mut top_hooks: Option<&mut Vec<Hook>>,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -261,9 +291,9 @@ fn process_lexical(
         }
 
         // Check for React hooks (array destructuring + hook call)
-        if let Some(ref mut hooks) = hooks {
-            if let Some(hook) = try_extract_hook(child, src) {
-                hooks.push(hook);
+        if let Some(ref mut top_hooks) = top_hooks {
+            if let Some(hook) = hooks::try_extract_hook(child, src) {
+                top_hooks.push(hook);
                 continue;
             }
         }
@@ -282,6 +312,63 @@ fn process_lexical(
         }
     }
 }
+
+// ── React.memo / React.forwardRef unwrapping ──
+
+/// Try to unwrap `React.memo(function ...)` or `React.forwardRef((p, r) => ...)`.
+///
+/// Returns a `Symbol` with the inner function's signature and `is_component: true`.
+fn try_unwrap_react_wrapper(declarator: Node, value: Node, src: &[u8]) -> Option<Symbol> {
+    if value.kind() != "call_expression" {
+        return None;
+    }
+
+    let callee = value.child_by_field_name("function")?;
+    let callee_text = txt(callee, src);
+
+    let wrapper = match callee_text {
+        "React.memo" | "memo" => "memo",
+        "React.forwardRef" | "forwardRef" => "forwardRef",
+        _ => return None,
+    };
+
+    let name_node = declarator.child_by_field_name("name")?;
+    let name = txt(name_node, src);
+
+    let args = value.child_by_field_name("arguments")?;
+
+    // Find the first function/arrow argument
+    let mut cursor = args.walk();
+    for arg in args.children(&mut cursor) {
+        match arg.kind() {
+            "function" | "function_declaration" | "function_expression" | "arrow_function" => {
+                let inner_sig = get_signature(arg, src);
+                let body = arg.child_by_field_name("body");
+                let renders = jsx::extract_jsx_components(body, src);
+                let calls = calls::extract_calls(body, src);
+                let (hooks, handlers) = body.map_or_else(Default::default, |b| {
+                    hooks::extract_body_hooks_and_handlers(b, src)
+                });
+                let calls = hooks::filter_hook_calls(calls, &hooks);
+                return Some(Symbol {
+                    signature: format!("const {name} = {wrapper}({inner_sig})"),
+                    line_start: declarator.start_position().row + 1,
+                    line_end: declarator.end_position().row + 1,
+                    calls,
+                    is_component: true,
+                    renders,
+                    hooks,
+                    handlers,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+// ── Const declarations ──
 
 /// Extract a non-function const declaration.
 ///
@@ -323,6 +410,8 @@ fn extract_const(declarator: Node, value: Node, src: &[u8], exported: bool) -> O
         calls: Vec::new(),
         is_component: false,
         renders: Vec::new(),
+        hooks: Vec::new(),
+        handlers: Vec::new(),
     })
 }
 
@@ -373,512 +462,10 @@ fn value_summary(value: Node, src: &[u8]) -> String {
     }
 }
 
-// ── Type definitions ──
-
-fn extract_type_def(node: Node, src: &[u8], exported: bool) -> Option<TypeDef> {
-    let name = node
-        .child_by_field_name("name")
-        .map(|n| txt(n, src).to_string())
-        .unwrap_or_default();
-
-    if name.is_empty() {
-        return None;
-    }
-
-    let kind = match node.kind() {
-        "interface_declaration" => "interface",
-        "type_alias_declaration" => "type",
-        "enum_declaration" => "enum",
-        _ => return None,
-    };
-
-    let extends = extract_extends_clause(node, src);
-
-    let summary = match kind {
-        "interface" => node
-            .child_by_field_name("body")
-            .map(|b| compress_members(b, src, &["property_signature", "method_signature"]))
-            .unwrap_or_default(),
-        "type" => node
-            .child_by_field_name("value")
-            .map(|v| {
-                let t = txt(v, src);
-                if t.len() > 80 {
-                    format!("{}...", &t[..77])
-                } else {
-                    t.to_string()
-                }
-            })
-            .unwrap_or_default(),
-        "enum" => node
-            .child_by_field_name("body")
-            .map(|b| {
-                compress_members(
-                    b,
-                    src,
-                    &["enum_member", "enum_assignment", "property_identifier"],
-                )
-            })
-            .unwrap_or_default(),
-        _ => String::new(),
-    };
-
-    Some(TypeDef {
-        name,
-        kind: kind.to_string(),
-        extends,
-        summary,
-        line_start: node.start_position().row + 1,
-        line_end: node.end_position().row + 1,
-        exported,
-    })
-}
-
-/// Extract the `extends` clause from an interface or class declaration.
-///
-/// For `interface Foo extends Bar, Baz`, returns `"Bar, Baz"`.
-fn extract_extends_clause(node: Node, src: &[u8]) -> String {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "extends_type_clause" || child.kind() == "extends_clause" {
-            // Collect type names from the clause (skip the "extends" keyword and commas)
-            let mut types = Vec::new();
-            let mut inner = child.walk();
-            for tc in child.children(&mut inner) {
-                if tc.kind() != "extends" && tc.kind() != "," {
-                    let t = txt(tc, src);
-                    if !t.is_empty() {
-                        types.push(t.to_string());
-                    }
-                }
-            }
-            if !types.is_empty() {
-                return types.join(", ");
-            }
-        }
-    }
-    String::new()
-}
-
-// ── JSX / React component detection ──
-
-/// Returns `true` if the body node contains a JSX return.
-///
-/// Checks for:
-/// - `return <jsx>` inside a statement block
-/// - Expression body that is directly a JSX node (arrow without braces)
-fn returns_jsx(body: Option<Node>) -> bool {
-    let Some(body) = body else { return false };
-
-    // Arrow expression body (no braces): `() => <div />`
-    if is_jsx_node(body.kind()) {
-        return true;
-    }
-
-    // Statement block: look for `return <jsx>`
-    if body.kind() == "statement_block" {
-        return has_jsx_return(body);
-    }
-
-    // Parenthesized expression: `() => (<div />)`
-    if body.kind() == "parenthesized_expression" {
-        let mut cursor = body.walk();
-        for child in body.children(&mut cursor) {
-            if is_jsx_node(child.kind()) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn is_jsx_node(kind: &str) -> bool {
-    matches!(
-        kind,
-        "jsx_element" | "jsx_self_closing_element" | "jsx_fragment"
-    )
-}
-
-/// Recursively search for a `return_statement` whose child is JSX.
-fn has_jsx_return(node: Node) -> bool {
-    if node.kind() == "return_statement" {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if is_jsx_node(child.kind()) {
-                return true;
-            }
-            // Handle parenthesized returns: `return (<div />)`
-            if child.kind() == "parenthesized_expression" {
-                let mut inner = child.walk();
-                for grandchild in child.children(&mut inner) {
-                    if is_jsx_node(grandchild.kind()) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    // Don't descend into nested functions
-    if matches!(
-        node.kind(),
-        "arrow_function" | "function" | "function_declaration"
-    ) {
-        return false;
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if has_jsx_return(child) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Extract component names rendered in JSX (uppercase tags only).
-///
-/// Returns a sorted, deduplicated list of component names found in the tree.
-/// HTML elements (`div`, `span`, etc.) are excluded by the uppercase filter.
-fn extract_jsx_components(body: Option<Node>, src: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
-    if let Some(body) = body {
-        walk_jsx_components(body, src, &mut names);
-    }
-    names.sort();
-    names.dedup();
-    names.truncate(10);
-    names
-}
-
-fn walk_jsx_components(node: Node, src: &[u8], names: &mut Vec<String>) {
-    match node.kind() {
-        "jsx_opening_element" | "jsx_self_closing_element" => {
-            // The tag name is the "name" field, or the first identifier/member_expression child
-            let tag_name = node
-                .child_by_field_name("name")
-                .map_or("", |n| txt(n, src));
-            if tag_name
-                .chars()
-                .next()
-                .is_some_and(char::is_uppercase)
-            {
-                names.push(tag_name.to_string());
-            }
-        }
-        // Don't descend into nested function definitions
-        "arrow_function" | "function" | "function_declaration" => return,
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_jsx_components(child, src, names);
-    }
-}
-
-// ── React.memo / React.forwardRef unwrapping ──
-
-/// Try to unwrap `React.memo(function ...)` or `React.forwardRef((p, r) => ...)`.
-///
-/// Returns a `Symbol` with the inner function's signature and `is_component: true`.
-fn try_unwrap_react_wrapper(
-    declarator: Node,
-    value: Node,
-    src: &[u8],
-) -> Option<Symbol> {
-    if value.kind() != "call_expression" {
-        return None;
-    }
-
-    let callee = value.child_by_field_name("function")?;
-    let callee_text = txt(callee, src);
-
-    let wrapper = match callee_text {
-        "React.memo" | "memo" => "memo",
-        "React.forwardRef" | "forwardRef" => "forwardRef",
-        _ => return None,
-    };
-
-    let name_node = declarator.child_by_field_name("name")?;
-    let name = txt(name_node, src);
-
-    let args = value.child_by_field_name("arguments")?;
-
-    // Find the first function/arrow argument
-    let mut cursor = args.walk();
-    for arg in args.children(&mut cursor) {
-        match arg.kind() {
-            "function" | "function_declaration" | "function_expression" | "arrow_function" => {
-                let inner_sig = get_signature(arg, src);
-                let body = arg.child_by_field_name("body");
-                let renders = extract_jsx_components(body, src);
-                let calls = extract_calls(body, src);
-                return Some(Symbol {
-                    signature: format!("const {name} = {wrapper}({inner_sig})"),
-                    line_start: declarator.start_position().row + 1,
-                    line_end: declarator.end_position().row + 1,
-                    calls,
-                    is_component: true,
-                    renders,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-// ── Test blocks (describe/it/test) ──
-
-/// Extract a test block from an expression statement.
-///
-/// Recognizes `describe(name, fn)`, `it(name, fn)`, `test(name, fn)`,
-/// `beforeEach(fn)`, `afterEach(fn)`, `beforeAll(fn)`, `afterAll(fn)`.
-fn extract_test_block(expr_stmt: Node, src: &[u8]) -> Option<TestBlock> {
-    let call = find_child_by_kind(expr_stmt, "call_expression")?;
-    extract_test_call(call, src)
-}
-
-fn extract_test_call(call: Node, src: &[u8]) -> Option<TestBlock> {
-    let func = call.child_by_field_name("function")?;
-
-    let func_name = match func.kind() {
-        "identifier" => txt(func, src).to_string(),
-        "member_expression" => {
-            // Handle describe.each, it.each, test.skip etc.
-            func.child_by_field_name("object")
-                .map(|o| txt(o, src).to_string())
-                .unwrap_or_default()
-        }
-        _ => return None,
-    };
-
-    if !is_test_function(&func_name) {
-        return None;
-    }
-
-    let args = call.child_by_field_name("arguments")?;
-
-    // Extract the test name (first string argument)
-    let name = extract_first_string_arg(args, src);
-
-    // For describe blocks, recurse into the callback body to find nested tests
-    let children = if func_name == "describe" {
-        extract_nested_tests(args, src)
-    } else {
-        Vec::new()
-    };
-
-    Some(TestBlock {
-        kind: func_name,
-        name,
-        line_start: call.start_position().row + 1,
-        line_end: call.end_position().row + 1,
-        children,
-    })
-}
-
-fn is_test_function(name: &str) -> bool {
-    matches!(
-        name,
-        "describe" | "it" | "test" | "beforeEach" | "afterEach" | "beforeAll" | "afterAll"
-    )
-}
-
-/// Extract the first string literal from an arguments node.
-fn extract_first_string_arg(args: Node, src: &[u8]) -> String {
-    let mut cursor = args.walk();
-    for child in args.children(&mut cursor) {
-        if child.kind() == "string" || child.kind() == "template_string" {
-            return trim_quotes(txt(child, src)).to_string();
-        }
-    }
-    String::new()
-}
-
-/// Recurse into a describe callback to find nested describe/it/test calls.
-fn extract_nested_tests(args: Node, src: &[u8]) -> Vec<TestBlock> {
-    let mut children = Vec::new();
-
-    let mut cursor = args.walk();
-    for child in args.children(&mut cursor) {
-        if child.kind() == "arrow_function" || child.kind() == "function" {
-            if let Some(body) = child.child_by_field_name("body") {
-                let mut body_cursor = body.walk();
-                for stmt in body.children(&mut body_cursor) {
-                    if stmt.kind() == "expression_statement" {
-                        if let Some(call) = find_child_by_kind(stmt, "call_expression") {
-                            if let Some(tb) = extract_test_call(call, src) {
-                                children.push(tb);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    children
-}
-
-fn find_child_by_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    let mut cursor = node.walk();
-    let result = node.children(&mut cursor).find(|c| c.kind() == kind);
-    result
-}
-
-// ── React hooks ──
-
-/// Try to extract a React hook from a variable declarator.
-///
-/// Detects patterns like:
-/// - `const [state, setState] = useState(init)`
-/// - `const [state, setState] = React.useState(init)`
-/// - `const memoized = useMemo(() => ..., [deps])`
-/// - `const ref = useRef(init)`
-fn try_extract_hook(declarator: Node, src: &[u8]) -> Option<Hook> {
-    let value = declarator.child_by_field_name("value")?;
-
-    if value.kind() != "call_expression" {
-        return None;
-    }
-
-    let hook_name = extract_hook_name(value, src)?;
-    let name_node = declarator.child_by_field_name("name")?;
-
-    let bindings = match name_node.kind() {
-        // const [state, setState] = useState(...)
-        "array_pattern" => {
-            let mut names = Vec::new();
-            let mut cursor = name_node.walk();
-            for child in name_node.children(&mut cursor) {
-                if child.kind() == "identifier" {
-                    names.push(txt(child, src).to_string());
-                }
-            }
-            names
-        }
-        // const memoized = useMemo(...)
-        "identifier" => vec![txt(name_node, src).to_string()],
-        _ => Vec::new(),
-    };
-
-    Some(Hook {
-        kind: hook_name,
-        bindings,
-        line_start: declarator.start_position().row + 1,
-        line_end: declarator.end_position().row + 1,
-    })
-}
-
-/// Extract the hook name from a call expression, returning `None` if not a hook.
-///
-/// Matches `useState(...)`, `React.useState(...)`, `useEffect(...)`, etc.
-fn extract_hook_name(call: Node, src: &[u8]) -> Option<String> {
-    let func = call.child_by_field_name("function")?;
-
-    let name = match func.kind() {
-        "identifier" => txt(func, src).to_string(),
-        "member_expression" => {
-            // React.useState → "useState"
-            func.child_by_field_name("property")
-                .map(|p| txt(p, src).to_string())
-                .unwrap_or_default()
-        }
-        _ => return None,
-    };
-
-    if name.starts_with("use") && name.len() > 3 {
-        Some(name)
-    } else {
-        None
-    }
-}
-
-// ── Call extraction (body hints) ──
-
-fn extract_calls(body: Option<Node>, src: &[u8]) -> Vec<String> {
-    let mut calls = Vec::new();
-    if let Some(body) = body {
-        walk_calls(body, src, &mut calls);
-    }
-    calls.sort();
-    calls.dedup();
-    calls.truncate(10);
-    calls
-}
-
-fn walk_calls(node: Node, src: &[u8], calls: &mut Vec<String>) {
-    if node.kind() == "call_expression" {
-        if let Some(func) = node.child_by_field_name("function") {
-            let name = match func.kind() {
-                "identifier" => {
-                    let n = txt(func, src);
-                    if is_noise(n) {
-                        String::new()
-                    } else {
-                        n.to_string()
-                    }
-                }
-                "member_expression" => extract_member_call(func, src),
-                _ => String::new(),
-            };
-            if !name.is_empty() {
-                calls.push(name);
-            }
-        }
-    }
-
-    // Don't descend into nested function definitions
-    if matches!(
-        node.kind(),
-        "arrow_function" | "function" | "function_declaration"
-    ) {
-        return;
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_calls(child, src, calls);
-    }
-}
-
-fn extract_member_call(func: Node, src: &[u8]) -> String {
-    let Some(prop) = func.child_by_field_name("property") else {
-        return String::new();
-    };
-
-    let obj = func.child_by_field_name("object").map_or_else(
-        || "?".to_string(),
-        |o| match o.kind() {
-            "identifier" | "this" => txt(o, src).to_string(),
-            "member_expression" => {
-                let t = txt(o, src);
-                if t.len() > 30 {
-                    "\u{2026}".to_string()
-                } else {
-                    t.to_string()
-                }
-            }
-            _ => "\u{2026}".to_string(),
-        },
-    );
-
-    let full = format!("{}.{}", obj, txt(prop, src));
-    if full.len() > 40 || is_noise(&full) {
-        String::new()
-    } else {
-        full
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::JsxNode;
 
     fn parse_ts(src: &[u8]) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
@@ -1179,6 +766,7 @@ describe('suite', () => {
         assert_eq!(symbols.hooks.len(), 1, "should find 1 hook");
         assert_eq!(symbols.hooks[0].kind, "useState");
         assert_eq!(symbols.hooks[0].bindings, vec!["count", "setCount"]);
+        assert_eq!(symbols.hooks[0].deps, None);
     }
 
     #[test]
@@ -1190,6 +778,7 @@ describe('suite', () => {
         assert_eq!(symbols.hooks.len(), 1);
         assert_eq!(symbols.hooks[0].kind, "useState");
         assert_eq!(symbols.hooks[0].bindings, vec!["isOpen", "setIsOpen"]);
+        assert_eq!(symbols.hooks[0].deps, None);
     }
 
     #[test]
@@ -1201,6 +790,7 @@ describe('suite', () => {
         assert_eq!(symbols.hooks.len(), 1);
         assert_eq!(symbols.hooks[0].kind, "useMemo");
         assert_eq!(symbols.hooks[0].bindings, vec!["memoized"]);
+        assert_eq!(symbols.hooks[0].deps, Some(vec!["data".to_string()]));
     }
 
     #[test]
@@ -1212,6 +802,7 @@ describe('suite', () => {
         assert_eq!(symbols.hooks.len(), 1);
         assert_eq!(symbols.hooks[0].kind, "useRef");
         assert_eq!(symbols.hooks[0].bindings, vec!["inputRef"]);
+        assert_eq!(symbols.hooks[0].deps, None);
     }
 
     #[test]
@@ -1285,7 +876,10 @@ describe('suite', () => {
         assert!(symbols.internals[0].is_component);
         assert_eq!(
             symbols.internals[0].renders,
-            vec!["Header", "UserList"],
+            vec![
+                JsxNode { name: "Header".into(), children: vec![] },
+                JsxNode { name: "UserList".into(), children: vec![] },
+            ],
             "should only include uppercase component tags, not html elements"
         );
     }
@@ -1354,8 +948,344 @@ describe('suite', () => {
         assert!(symbols.internals[0].is_component);
         assert_eq!(
             symbols.internals[0].renders,
-            vec!["Header"],
+            vec![JsxNode { name: "Header".into(), children: vec![] }],
             "should find components in parenthesized JSX return"
+        );
+    }
+
+    // ── Deps extraction ──
+
+    #[test]
+    fn hook_with_empty_deps() {
+        let src = b"const memoized = useMemo(() => compute(), []);";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.hooks.len(), 1);
+        assert_eq!(symbols.hooks[0].deps, Some(vec![]));
+    }
+
+    #[test]
+    fn hook_with_multiple_deps() {
+        let src = b"const cb = useCallback(() => save(a, b), [a, b]);";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.hooks.len(), 1);
+        assert_eq!(
+            symbols.hooks[0].deps,
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn hook_without_deps_returns_none() {
+        let src = b"const inputRef = useRef(null);";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.hooks.len(), 1);
+        assert_eq!(symbols.hooks[0].deps, None);
+    }
+
+    // ── Component body hooks ──
+
+    #[test]
+    fn component_extracts_body_usestate() {
+        let src = br"function App() {
+  const [count, setCount] = useState(0);
+  return <div>{count}</div>;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals.len(), 1);
+        assert!(symbols.internals[0].is_component);
+        assert_eq!(symbols.internals[0].hooks.len(), 1);
+        assert_eq!(symbols.internals[0].hooks[0].kind, "useState");
+        assert_eq!(
+            symbols.internals[0].hooks[0].bindings,
+            vec!["count", "setCount"]
+        );
+    }
+
+    #[test]
+    fn component_extracts_bare_useeffect() {
+        let src = br"function App() {
+  useEffect(() => { console.log('mounted'); }, []);
+  return <div />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals[0].hooks.len(), 1);
+        assert_eq!(symbols.internals[0].hooks[0].kind, "useEffect");
+        assert!(symbols.internals[0].hooks[0].bindings.is_empty());
+        assert_eq!(symbols.internals[0].hooks[0].deps, Some(vec![]));
+    }
+
+    #[test]
+    fn component_extracts_useeffect_with_deps() {
+        let src = br"function App() {
+  const [count, setCount] = useState(0);
+  useEffect(() => { document.title = String(count); }, [count]);
+  return <div />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals[0].hooks.len(), 2);
+        assert_eq!(symbols.internals[0].hooks[1].kind, "useEffect");
+        assert_eq!(
+            symbols.internals[0].hooks[1].deps,
+            Some(vec!["count".to_string()])
+        );
+    }
+
+    #[test]
+    fn component_extracts_multiple_hooks_in_order() {
+        let src = br"function Dashboard() {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const theme = useContext(ThemeCtx);
+  useEffect(() => { fetch('/api'); }, []);
+  const data = useMemo(() => transform(user), [user]);
+  return <div />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let hooks = &symbols.internals[0].hooks;
+        assert_eq!(hooks.len(), 5);
+        assert_eq!(hooks[0].kind, "useState");
+        assert_eq!(hooks[0].bindings, vec!["user", "setUser"]);
+        assert_eq!(hooks[1].kind, "useState");
+        assert_eq!(hooks[1].bindings, vec!["loading", "setLoading"]);
+        assert_eq!(hooks[2].kind, "useContext");
+        assert_eq!(hooks[2].bindings, vec!["theme"]);
+        assert_eq!(hooks[3].kind, "useEffect");
+        assert_eq!(hooks[3].deps, Some(vec![]));
+        assert_eq!(hooks[4].kind, "useMemo");
+        assert_eq!(hooks[4].bindings, vec!["data"]);
+        assert_eq!(hooks[4].deps, Some(vec!["user".to_string()]));
+    }
+
+    #[test]
+    fn component_hooks_filtered_from_calls() {
+        let src = br"function App() {
+  const [x, setX] = useState(0);
+  fetchData();
+  return <div />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let calls = &symbols.internals[0].calls;
+        assert!(
+            !calls.iter().any(|c| c.contains("useState")),
+            "hooks should not appear in calls: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"fetchData".to_string()),
+            "non-hook calls should remain: {calls:?}"
+        );
+    }
+
+    // ── Component body handlers ──
+
+    #[test]
+    fn component_extracts_function_handler() {
+        let src = br"function App() {
+  function handleClick() { console.log('click'); }
+  return <button onClick={handleClick} />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].handlers,
+            vec!["handleClick"],
+            "should extract function declaration handler"
+        );
+    }
+
+    #[test]
+    fn component_extracts_arrow_handler() {
+        let src = br"function App() {
+  const handleHover = () => { console.log('hover'); };
+  return <div onMouseOver={handleHover} />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].handlers,
+            vec!["handleHover"],
+            "should extract arrow function handler"
+        );
+    }
+
+    #[test]
+    fn component_skips_nested_callback_functions() {
+        let src = br"function App() {
+  useEffect(() => {
+    function innerHelper() {}
+    const innerArrow = () => {};
+  }, []);
+  return <div />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(
+            symbols.internals[0].handlers.is_empty(),
+            "functions inside useEffect callbacks should not be handlers: {:?}",
+            symbols.internals[0].handlers
+        );
+    }
+
+    // ── Edge cases ──
+
+    #[test]
+    fn non_component_has_no_body_hooks() {
+        let src = b"function compute() { const x = useMemo(() => 1, []); return x; }";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(
+            symbols.internals[0].hooks.is_empty(),
+            "non-component functions should not have body hooks extracted"
+        );
+    }
+
+    #[test]
+    fn class_has_empty_hooks_handlers() {
+        let src = b"class Foo { bar() { return 1; } }";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(!symbols.internals.is_empty());
+        assert!(symbols.internals[0].hooks.is_empty());
+        assert!(symbols.internals[0].handlers.is_empty());
+    }
+
+    #[test]
+    fn memo_component_extracts_hooks() {
+        let src = br"const Card = React.memo(function Card() {
+  const [open, setOpen] = useState(false);
+  return <div />;
+});";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals.len(), 1);
+        assert!(symbols.internals[0].is_component);
+        assert_eq!(symbols.internals[0].hooks.len(), 1);
+        assert_eq!(symbols.internals[0].hooks[0].kind, "useState");
+        assert_eq!(
+            symbols.internals[0].hooks[0].bindings,
+            vec!["open", "setOpen"]
+        );
+    }
+
+    #[test]
+    fn exported_arrow_component_extracts_hooks() {
+        let src = br"export const App = () => {
+  const [count, setCount] = useState(0);
+  const handleClick = () => { setCount(c => c + 1); };
+  return <button onClick={handleClick}>{count}</button>;
+};";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.exports.len(), 1);
+        assert!(symbols.exports[0].is_component);
+        assert_eq!(symbols.exports[0].hooks.len(), 1);
+        assert_eq!(symbols.exports[0].hooks[0].kind, "useState");
+        assert_eq!(symbols.exports[0].handlers, vec!["handleClick"]);
+    }
+
+    #[test]
+    fn useeffect_member_expression_deps() {
+        let src = br"function App() {
+  useEffect(() => {}, [props.id, state]);
+  return <div />;
+}";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].hooks[0].deps,
+            Some(vec!["props.id".to_string(), "state".to_string()])
+        );
+    }
+
+    // ── JSX hierarchy tree ──
+
+    #[test]
+    fn jsx_tree_nested_components() {
+        let src = b"function App() { return <Card><Avatar /></Card>; }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].renders,
+            vec![JsxNode {
+                name: "Card".into(),
+                children: vec![JsxNode { name: "Avatar".into(), children: vec![] }],
+            }],
+            "nested components should form a tree: Card > Avatar"
+        );
+    }
+
+    #[test]
+    fn jsx_tree_html_passthrough() {
+        let src = b"function App() { return <div><span><Badge /></span></div>; }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].renders,
+            vec![JsxNode { name: "Badge".into(), children: vec![] }],
+            "HTML elements should be transparent, promoting children"
+        );
+    }
+
+    #[test]
+    fn jsx_tree_mixed_depth() {
+        let src = b"function App() { return <Layout><Header /><Content><List /></Content></Layout>; }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].renders,
+            vec![JsxNode {
+                name: "Layout".into(),
+                children: vec![
+                    JsxNode {
+                        name: "Content".into(),
+                        children: vec![JsxNode { name: "List".into(), children: vec![] }],
+                    },
+                    JsxNode { name: "Header".into(), children: vec![] },
+                ],
+            }],
+            "should preserve hierarchy with sorted children"
+        );
+    }
+
+    #[test]
+    fn jsx_tree_dedup_siblings() {
+        let src = b"function App() { return <div><Icon /><Icon /><Badge /></div>; }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].renders,
+            vec![
+                JsxNode { name: "Badge".into(), children: vec![] },
+                JsxNode { name: "Icon".into(), children: vec![] },
+            ],
+            "duplicate siblings should be merged and sorted"
         );
     }
 }

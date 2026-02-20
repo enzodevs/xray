@@ -1,5 +1,33 @@
 use std::fmt;
 
+/// A JSX component node in the render tree.
+#[derive(Debug, PartialEq)]
+pub struct JsxNode {
+    pub name: String,
+    pub children: Vec<JsxNode>,
+}
+
+impl fmt::Display for JsxNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        match self.children.len() {
+            0 => {}
+            1 => write!(f, " > {}", self.children[0])?,
+            _ => {
+                write!(f, " > [")?;
+                for (i, child) in self.children.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{child}")?;
+                }
+                write!(f, "]")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A function or method extracted from the AST.
 pub struct Symbol {
     pub signature: String,
@@ -7,7 +35,9 @@ pub struct Symbol {
     pub line_end: usize,
     pub calls: Vec<String>,
     pub is_component: bool,
-    pub renders: Vec<String>,
+    pub renders: Vec<JsxNode>,
+    pub hooks: Vec<Hook>,
+    pub handlers: Vec<String>,
 }
 
 /// Wrapper for indented display of a value.
@@ -22,11 +52,27 @@ impl fmt::Display for Indented<'_, Symbol> {
             "{}{marker}{}  [L{}-{}]",
             indent, sym.signature, sym.line_start, sym.line_end
         )?;
+        if !sym.hooks.is_empty() {
+            write!(f, "\n{indent}  hooks:")?;
+            let deeper = format!("{indent}    ");
+            for h in &sym.hooks {
+                write!(f, "\n{}", Indented(&deeper, h))?;
+            }
+        }
+        if !sym.handlers.is_empty() {
+            write!(f, "\n{}  handlers: {}", indent, sym.handlers.join(", "))?;
+        }
         if !sym.calls.is_empty() {
             write!(f, "\n{}  calls: {}", indent, sym.calls.join(", "))?;
         }
         if !sym.renders.is_empty() {
-            write!(f, "\n{}  renders: {}", indent, sym.renders.join(", "))?;
+            write!(f, "\n{indent}  renders: ")?;
+            for (i, node) in sym.renders.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{node}")?;
+            }
         }
         Ok(())
     }
@@ -98,6 +144,7 @@ pub fn write_test_tree(
 pub struct Hook {
     pub kind: String,
     pub bindings: Vec<String>,
+    pub deps: Option<Vec<String>>,
     pub line_start: usize,
     pub line_end: usize,
 }
@@ -108,6 +155,13 @@ impl fmt::Display for Indented<'_, Hook> {
         write!(f, "{}{}", indent, h.kind)?;
         if !h.bindings.is_empty() {
             write!(f, ": {}", h.bindings.join(", "))?;
+        }
+        if let Some(deps) = &h.deps {
+            if deps.is_empty() {
+                write!(f, "  deps: []")?;
+            } else {
+                write!(f, "  deps: [{}]", deps.join(", "))?;
+            }
         }
         write!(f, "  [L{}-{}]", h.line_start, h.line_end)
     }
