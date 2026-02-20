@@ -6,6 +6,8 @@ pub struct Symbol {
     pub line_start: usize,
     pub line_end: usize,
     pub calls: Vec<String>,
+    pub is_component: bool,
+    pub renders: Vec<String>,
 }
 
 /// Wrapper for indented display of a value.
@@ -14,13 +16,17 @@ pub struct Indented<'a, T>(pub &'a str, pub &'a T);
 impl fmt::Display for Indented<'_, Symbol> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Indented(indent, sym) = self;
+        let marker = if sym.is_component { "[component] " } else { "" };
         write!(
             f,
-            "{}{}  [L{}-{}]",
+            "{}{marker}{}  [L{}-{}]",
             indent, sym.signature, sym.line_start, sym.line_end
         )?;
         if !sym.calls.is_empty() {
             write!(f, "\n{}  calls: {}", indent, sym.calls.join(", "))?;
+        }
+        if !sym.renders.is_empty() {
+            write!(f, "\n{}  renders: {}", indent, sym.renders.join(", "))?;
         }
         Ok(())
     }
@@ -69,9 +75,17 @@ pub struct TestBlock {
 }
 
 /// Write a test tree with recursive indentation.
-pub fn write_test_tree(f: &mut fmt::Formatter<'_>, tests: &[TestBlock], indent: &str) -> fmt::Result {
+pub fn write_test_tree(
+    f: &mut fmt::Formatter<'_>,
+    tests: &[TestBlock],
+    indent: &str,
+) -> fmt::Result {
     for t in tests {
-        writeln!(f, "{}{} {:?}  [L{}-{}]", indent, t.kind, t.name, t.line_start, t.line_end)?;
+        writeln!(
+            f,
+            "{}{} {:?}  [L{}-{}]",
+            indent, t.kind, t.name, t.line_start, t.line_end
+        )?;
         if !t.children.is_empty() {
             let deeper = format!("{indent}  ");
             write_test_tree(f, &t.children, &deeper)?;

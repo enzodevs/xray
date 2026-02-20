@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::model::{FileSymbols, Indented, write_test_tree};
+use crate::model::{write_test_tree, FileSymbols, Indented};
 
 /// Complete digest of a single file, ready for display.
 pub struct FileDigest {
@@ -12,7 +12,11 @@ pub struct FileDigest {
 
 impl fmt::Display for FileDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{}  ({}, {} lines)", self.display_path, self.ext, self.total_lines)?;
+        writeln!(
+            f,
+            "{}  ({}, {} lines)",
+            self.display_path, self.ext, self.total_lines
+        )?;
         writeln!(f)?;
 
         if !self.symbols.imports.is_empty() {
@@ -85,19 +89,23 @@ enum SectionAfter {
 fn has_more_sections(s: &FileSymbols, after: SectionAfter) -> bool {
     match after {
         SectionAfter::Exports => {
-            !s.internals.is_empty() || !s.hooks.is_empty() || !s.types.is_empty() || !s.tests.is_empty()
+            !s.internals.is_empty()
+                || !s.hooks.is_empty()
+                || !s.types.is_empty()
+                || !s.tests.is_empty()
         }
         SectionAfter::Internals => {
             !s.hooks.is_empty() || !s.types.is_empty() || !s.tests.is_empty()
         }
-        SectionAfter::Hooks => {
-            !s.types.is_empty() || !s.tests.is_empty()
-        }
+        SectionAfter::Hooks => !s.types.is_empty() || !s.tests.is_empty(),
     }
 }
 
 /// Group re-exports by source module for compact output.
-fn write_reexports(f: &mut fmt::Formatter<'_>, reexports: &[crate::model::ReExport]) -> fmt::Result {
+fn write_reexports(
+    f: &mut fmt::Formatter<'_>,
+    reexports: &[crate::model::ReExport],
+) -> fmt::Result {
     let mut by_source: Vec<(&str, Vec<&str>, bool)> = Vec::new();
 
     for re in reexports {
@@ -107,7 +115,11 @@ fn write_reexports(f: &mut fmt::Formatter<'_>, reexports: &[crate::model::ReExpo
         {
             existing.1.extend(re.names.iter().map(String::as_str));
         } else {
-            by_source.push((&re.source, re.names.iter().map(String::as_str).collect(), re.is_type));
+            by_source.push((
+                &re.source,
+                re.names.iter().map(String::as_str).collect(),
+                re.is_type,
+            ));
         }
     }
 

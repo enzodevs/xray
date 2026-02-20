@@ -17,10 +17,7 @@ pub fn detect_language(ext: &str) -> Result<Language, XrayError> {
 
 /// Read and parse a source file, returning the tree-sitter tree and source text.
 pub fn parse_file(path: &Path) -> Result<(Tree, String), XrayError> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let source = std::fs::read_to_string(path).map_err(|e| XrayError::Io {
         path: path.display().to_string(),

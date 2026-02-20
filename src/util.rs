@@ -8,6 +8,11 @@ pub fn txt<'a>(node: Node, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
 
+/// Strip surrounding quotes (`'`, `"`, `` ` ``) from a string literal.
+pub fn trim_quotes(s: &str) -> &str {
+    s.trim_matches(|c: char| c == '\'' || c == '"' || c == '`')
+}
+
 /// Returns `true` for common runtime calls that add noise to the digest.
 pub fn is_noise(name: &str) -> bool {
     matches!(

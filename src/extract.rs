@@ -1,7 +1,7 @@
 use tree_sitter::Node;
 
 use crate::model::{FileSymbols, Hook, ReExport, Symbol, TestBlock, TypeDef};
-use crate::util::{compress_members, is_noise, txt};
+use crate::util::{compress_members, is_noise, trim_quotes, txt};
 
 /// Walk top-level children of the AST root and extract all symbols.
 pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
@@ -22,13 +22,7 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
                 extract_import(node, src, &mut symbols.imports);
             }
             "export_statement" => {
-                process_export(
-                    node,
-                    src,
-                    &mut symbols.exports,
-                    &mut symbols.types,
-                    &mut symbols.reexports,
-                );
+                process_export(node, src, &mut symbols);
             }
             "function_declaration" => {
                 if let Some(sym) = extract_function(node, src) {
@@ -36,7 +30,7 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
                 }
             }
             "class_declaration" => {
-                extract_class(node, src, false, &mut symbols.internals);
+                extract_class(node, src, &mut symbols.internals);
             }
             "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
                 if let Some(t) = extract_type_def(node, src, false) {
@@ -44,7 +38,13 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
                 }
             }
             "lexical_declaration" => {
-                process_lexical(node, src, false, &mut symbols.internals, &mut symbols.hooks);
+                process_lexical(
+                    node,
+                    src,
+                    false,
+                    &mut symbols.internals,
+                    Some(&mut symbols.hooks),
+                );
             }
             "expression_statement" => {
                 if let Some(tb) = extract_test_block(node, src) {
@@ -62,7 +62,7 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
 
 fn extract_import(node: Node, src: &[u8], imports: &mut Vec<String>) {
     if let Some(source_node) = node.child_by_field_name("source") {
-        let path = txt(source_node, src).trim_matches(|c: char| c == '\'' || c == '"');
+        let path = trim_quotes(txt(source_node, src));
         if path.starts_with('.') || path.starts_with("@/") {
             imports.push(path.to_string());
         }
@@ -92,13 +92,22 @@ fn extract_function(node: Node, src: &[u8]) -> Option<Symbol> {
         return None;
     }
 
-    let calls = extract_calls(node.child_by_field_name("body"), src);
+    let body = node.child_by_field_name("body");
+    let is_component = returns_jsx(body);
+    let calls = extract_calls(body, src);
+    let renders = if is_component {
+        extract_jsx_components(body, src)
+    } else {
+        Vec::new()
+    };
 
     Some(Symbol {
         signature: sig,
         line_start: node.start_position().row + 1,
         line_end: node.end_position().row + 1,
         calls,
+        is_component,
+        renders,
     })
 }
 
@@ -117,27 +126,30 @@ fn extract_arrow(declarator: Node, src: &[u8]) -> Option<Symbol> {
     let prefix = if is_async { "async const " } else { "const " };
     let sig = format!("{prefix}{name} = {arrow_sig}");
 
-    let calls = extract_calls(value.child_by_field_name("body"), src);
+    let body = value.child_by_field_name("body");
+    let is_component = returns_jsx(body);
+    let calls = extract_calls(body, src);
+    let renders = if is_component {
+        extract_jsx_components(body, src)
+    } else {
+        Vec::new()
+    };
 
     Some(Symbol {
         signature: sig,
         line_start: declarator.start_position().row + 1,
         line_end: declarator.end_position().row + 1,
         calls,
+        is_component,
+        renders,
     })
 }
 
 // ── Exports ──
 
-fn process_export(
-    node: Node,
-    src: &[u8],
-    exports: &mut Vec<Symbol>,
-    types: &mut Vec<TypeDef>,
-    reexports: &mut Vec<ReExport>,
-) {
+fn process_export(node: Node, src: &[u8], symbols: &mut FileSymbols) {
     if node.child_by_field_name("source").is_some() {
-        extract_reexport(node, src, reexports);
+        extract_reexport(node, src, &mut symbols.reexports);
         return;
     }
 
@@ -146,20 +158,19 @@ fn process_export(
         match child.kind() {
             "function_declaration" => {
                 if let Some(sym) = extract_function(child, src) {
-                    exports.push(sym);
+                    symbols.exports.push(sym);
                 }
             }
             "class_declaration" => {
-                extract_class(child, src, true, exports);
+                extract_class(child, src, &mut symbols.exports);
             }
             "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
                 if let Some(t) = extract_type_def(child, src, true) {
-                    types.push(t);
+                    symbols.types.push(t);
                 }
             }
             "lexical_declaration" => {
-                // Exported lexicals don't produce hooks (hooks are internal by nature)
-                process_lexical(child, src, true, exports, &mut Vec::new());
+                process_lexical(child, src, true, &mut symbols.exports, None);
             }
             _ => {}
         }
@@ -169,11 +180,7 @@ fn process_export(
 fn extract_reexport(node: Node, src: &[u8], reexports: &mut Vec<ReExport>) {
     let source = node
         .child_by_field_name("source")
-        .map(|s| {
-            txt(s, src)
-                .trim_matches(|c: char| c == '\'' || c == '"')
-                .to_string()
-        })
+        .map(|s| trim_quotes(txt(s, src)).to_string())
         .unwrap_or_default();
 
     let full = txt(node, src);
@@ -209,7 +216,7 @@ fn extract_reexport(node: Node, src: &[u8], reexports: &mut Vec<ReExport>) {
 
 // ── Classes ──
 
-fn extract_class(node: Node, src: &[u8], _exported: bool, symbols: &mut Vec<Symbol>) {
+fn extract_class(node: Node, src: &[u8], symbols: &mut Vec<Symbol>) {
     let class_sig = get_signature(node, src);
     let class_start = node.start_position().row + 1;
     let class_end = node.end_position().row + 1;
@@ -219,12 +226,17 @@ fn extract_class(node: Node, src: &[u8], _exported: bool, symbols: &mut Vec<Symb
         line_start: class_start,
         line_end: class_end,
         calls: Vec::new(),
+        is_component: false,
+        renders: Vec::new(),
     });
 
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         for member in body.children(&mut cursor) {
-            if matches!(member.kind(), "method_definition" | "public_field_definition") {
+            if matches!(
+                member.kind(),
+                "method_definition" | "public_field_definition"
+            ) {
                 if let Some(sym) = extract_function(member, src) {
                     symbols.push(sym);
                 }
@@ -240,7 +252,7 @@ fn process_lexical(
     src: &[u8],
     exported: bool,
     symbols: &mut Vec<Symbol>,
-    hooks: &mut Vec<Hook>,
+    mut hooks: Option<&mut Vec<Hook>>,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -249,13 +261,18 @@ fn process_lexical(
         }
 
         // Check for React hooks (array destructuring + hook call)
-        if let Some(hook) = try_extract_hook(child, src) {
-            hooks.push(hook);
-            continue;
+        if let Some(ref mut hooks) = hooks {
+            if let Some(hook) = try_extract_hook(child, src) {
+                hooks.push(hook);
+                continue;
+            }
         }
 
         if let Some(value) = child.child_by_field_name("value") {
-            if value.kind() == "arrow_function" {
+            // Try React.memo / React.forwardRef unwrapping first
+            if let Some(sym) = try_unwrap_react_wrapper(child, value, src) {
+                symbols.push(sym);
+            } else if value.kind() == "arrow_function" {
                 if let Some(sym) = extract_arrow(child, src) {
                     symbols.push(sym);
                 }
@@ -271,12 +288,7 @@ fn process_lexical(
 /// Exported consts are always shown. Internal consts are shown when they
 /// carry structural information: type annotations, complex values (call
 /// expressions, objects, arrays, `new`, `as` casts), or span multiple lines.
-fn extract_const(
-    declarator: Node,
-    value: Node,
-    src: &[u8],
-    exported: bool,
-) -> Option<Symbol> {
+fn extract_const(declarator: Node, value: Node, src: &[u8], exported: bool) -> Option<Symbol> {
     let has_type_ann = declarator.child_by_field_name("type").is_some();
     let interesting_value = is_structural_value(value.kind());
     let multiline = value.end_position().row > value.start_position().row + 2;
@@ -309,6 +321,8 @@ fn extract_const(
         line_start: declarator.start_position().row + 1,
         line_end: declarator.end_position().row + 1,
         calls: Vec::new(),
+        is_component: false,
+        renders: Vec::new(),
     })
 }
 
@@ -331,7 +345,11 @@ fn value_summary(value: Node, src: &[u8]) -> String {
         "call_expression" => {
             let callee = value.child_by_field_name("function").map_or("?", |f| {
                 let t = txt(f, src);
-                if t.len() > 30 { &t[..30] } else { t }
+                if t.len() > 30 {
+                    &t[..30]
+                } else {
+                    t
+                }
             });
             format!("{callee}(...)")
         }
@@ -395,7 +413,11 @@ fn extract_type_def(node: Node, src: &[u8], exported: bool) -> Option<TypeDef> {
         "enum" => node
             .child_by_field_name("body")
             .map(|b| {
-                compress_members(b, src, &["enum_member", "enum_assignment", "property_identifier"])
+                compress_members(
+                    b,
+                    src,
+                    &["enum_member", "enum_assignment", "property_identifier"],
+                )
             })
             .unwrap_or_default(),
         _ => String::new(),
@@ -436,6 +458,178 @@ fn extract_extends_clause(node: Node, src: &[u8]) -> String {
         }
     }
     String::new()
+}
+
+// ── JSX / React component detection ──
+
+/// Returns `true` if the body node contains a JSX return.
+///
+/// Checks for:
+/// - `return <jsx>` inside a statement block
+/// - Expression body that is directly a JSX node (arrow without braces)
+fn returns_jsx(body: Option<Node>) -> bool {
+    let Some(body) = body else { return false };
+
+    // Arrow expression body (no braces): `() => <div />`
+    if is_jsx_node(body.kind()) {
+        return true;
+    }
+
+    // Statement block: look for `return <jsx>`
+    if body.kind() == "statement_block" {
+        return has_jsx_return(body);
+    }
+
+    // Parenthesized expression: `() => (<div />)`
+    if body.kind() == "parenthesized_expression" {
+        let mut cursor = body.walk();
+        for child in body.children(&mut cursor) {
+            if is_jsx_node(child.kind()) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn is_jsx_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "jsx_element" | "jsx_self_closing_element" | "jsx_fragment"
+    )
+}
+
+/// Recursively search for a `return_statement` whose child is JSX.
+fn has_jsx_return(node: Node) -> bool {
+    if node.kind() == "return_statement" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_jsx_node(child.kind()) {
+                return true;
+            }
+            // Handle parenthesized returns: `return (<div />)`
+            if child.kind() == "parenthesized_expression" {
+                let mut inner = child.walk();
+                for grandchild in child.children(&mut inner) {
+                    if is_jsx_node(grandchild.kind()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // Don't descend into nested functions
+    if matches!(
+        node.kind(),
+        "arrow_function" | "function" | "function_declaration"
+    ) {
+        return false;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if has_jsx_return(child) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract component names rendered in JSX (uppercase tags only).
+///
+/// Returns a sorted, deduplicated list of component names found in the tree.
+/// HTML elements (`div`, `span`, etc.) are excluded by the uppercase filter.
+fn extract_jsx_components(body: Option<Node>, src: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(body) = body {
+        walk_jsx_components(body, src, &mut names);
+    }
+    names.sort();
+    names.dedup();
+    names.truncate(10);
+    names
+}
+
+fn walk_jsx_components(node: Node, src: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "jsx_opening_element" | "jsx_self_closing_element" => {
+            // The tag name is the "name" field, or the first identifier/member_expression child
+            let tag_name = node
+                .child_by_field_name("name")
+                .map_or("", |n| txt(n, src));
+            if tag_name
+                .chars()
+                .next()
+                .is_some_and(char::is_uppercase)
+            {
+                names.push(tag_name.to_string());
+            }
+        }
+        // Don't descend into nested function definitions
+        "arrow_function" | "function" | "function_declaration" => return,
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_jsx_components(child, src, names);
+    }
+}
+
+// ── React.memo / React.forwardRef unwrapping ──
+
+/// Try to unwrap `React.memo(function ...)` or `React.forwardRef((p, r) => ...)`.
+///
+/// Returns a `Symbol` with the inner function's signature and `is_component: true`.
+fn try_unwrap_react_wrapper(
+    declarator: Node,
+    value: Node,
+    src: &[u8],
+) -> Option<Symbol> {
+    if value.kind() != "call_expression" {
+        return None;
+    }
+
+    let callee = value.child_by_field_name("function")?;
+    let callee_text = txt(callee, src);
+
+    let wrapper = match callee_text {
+        "React.memo" | "memo" => "memo",
+        "React.forwardRef" | "forwardRef" => "forwardRef",
+        _ => return None,
+    };
+
+    let name_node = declarator.child_by_field_name("name")?;
+    let name = txt(name_node, src);
+
+    let args = value.child_by_field_name("arguments")?;
+
+    // Find the first function/arrow argument
+    let mut cursor = args.walk();
+    for arg in args.children(&mut cursor) {
+        match arg.kind() {
+            "function" | "function_declaration" | "function_expression" | "arrow_function" => {
+                let inner_sig = get_signature(arg, src);
+                let body = arg.child_by_field_name("body");
+                let renders = extract_jsx_components(body, src);
+                let calls = extract_calls(body, src);
+                return Some(Symbol {
+                    signature: format!("const {name} = {wrapper}({inner_sig})"),
+                    line_start: declarator.start_position().row + 1,
+                    line_end: declarator.end_position().row + 1,
+                    calls,
+                    is_component: true,
+                    renders,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 // ── Test blocks (describe/it/test) ──
@@ -499,18 +693,8 @@ fn is_test_function(name: &str) -> bool {
 fn extract_first_string_arg(args: Node, src: &[u8]) -> String {
     let mut cursor = args.walk();
     for child in args.children(&mut cursor) {
-        if child.kind() == "string" {
-            let raw = txt(child, src);
-            return raw
-                .trim_matches(|c: char| c == '\'' || c == '"' || c == '`')
-                .to_string();
-        }
-        // Template literal: `name ${var}`
-        if child.kind() == "template_string" {
-            let raw = txt(child, src);
-            return raw
-                .trim_matches('`')
-                .to_string();
+        if child.kind() == "string" || child.kind() == "template_string" {
+            return trim_quotes(txt(child, src)).to_string();
         }
     }
     String::new()
@@ -1039,6 +1223,139 @@ describe('suite', () => {
         assert!(
             symbols.hooks.is_empty(),
             "fetchData is not a hook, should not appear in hooks"
+        );
+    }
+
+    // ── JSX / React components ──
+
+    fn parse_tsx(src: &[u8]) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+            .unwrap();
+        parser.parse(src, None).unwrap()
+    }
+
+    #[test]
+    fn returns_jsx_detects_component_with_return_statement() {
+        let src = b"export function App() { return <div />; }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.exports.len(), 1);
+        assert!(
+            symbols.exports[0].is_component,
+            "function returning JSX should be marked as component"
+        );
+    }
+
+    #[test]
+    fn returns_jsx_false_for_non_jsx_function() {
+        let src = b"export function compute(x: number) { return x * 2; }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.exports.len(), 1);
+        assert!(
+            !symbols.exports[0].is_component,
+            "function without JSX return should not be component"
+        );
+    }
+
+    #[test]
+    fn arrow_expression_body_jsx_is_component() {
+        let src = b"const Card = () => <div />;";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals.len(), 1);
+        assert!(
+            symbols.internals[0].is_component,
+            "arrow with JSX expression body should be component"
+        );
+    }
+
+    #[test]
+    fn extract_jsx_components_finds_uppercase_tags() {
+        let src = b"function App() { return <div><Header /><UserList users={[]} /><footer /></div>; }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals.len(), 1);
+        assert!(symbols.internals[0].is_component);
+        assert_eq!(
+            symbols.internals[0].renders,
+            vec!["Header", "UserList"],
+            "should only include uppercase component tags, not html elements"
+        );
+    }
+
+    #[test]
+    fn memo_unwraps_inner_function() {
+        let src = b"export const MemoCard = React.memo(function Card({ title }: Props) { return <h1>{title}</h1>; });";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.exports.len(), 1);
+        assert!(
+            symbols.exports[0].is_component,
+            "React.memo wrapper should produce a component"
+        );
+        assert!(
+            symbols.exports[0].signature.contains("memo("),
+            "signature should show memo wrapper: {}",
+            symbols.exports[0].signature
+        );
+        assert!(
+            symbols.exports[0].signature.contains("Card"),
+            "signature should include inner function name: {}",
+            symbols.exports[0].signature
+        );
+    }
+
+    #[test]
+    fn forward_ref_unwraps_inner_arrow() {
+        let src = b"const Input = React.forwardRef<HTMLInputElement, Props>((props, ref) => { return <input ref={ref} />; });";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals.len(), 1);
+        assert!(
+            symbols.internals[0].is_component,
+            "React.forwardRef wrapper should produce a component"
+        );
+        assert!(
+            symbols.internals[0].signature.contains("forwardRef("),
+            "signature should show forwardRef wrapper: {}",
+            symbols.internals[0].signature
+        );
+    }
+
+    #[test]
+    fn jsx_fragment_is_component() {
+        let src = b"const List = () => <><span /><span /></>;";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals.len(), 1);
+        assert!(
+            symbols.internals[0].is_component,
+            "arrow returning JSX fragment should be component"
+        );
+    }
+
+    #[test]
+    fn parenthesized_jsx_return_is_component() {
+        let src = b"function App() { return (\n  <div><Header /></div>\n); }";
+        let tree = parse_tsx(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.internals.len(), 1);
+        assert!(symbols.internals[0].is_component);
+        assert_eq!(
+            symbols.internals[0].renders,
+            vec!["Header"],
+            "should find components in parenthesized JSX return"
         );
     }
 }
