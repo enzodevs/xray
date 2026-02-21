@@ -1,4 +1,5 @@
 mod calls;
+mod decorators;
 mod hooks;
 mod jsx;
 mod tests_block;
@@ -55,7 +56,12 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
             "expression_statement" => {
                 if let Some(tb) = tests_block::extract_test_block(node, src) {
                     symbols.tests.push(tb);
+                } else {
+                    try_extract_namespace_from(node, src, &mut symbols);
                 }
+            }
+            "ambient_declaration" => {
+                try_extract_namespace_from(node, src, &mut symbols);
             }
             _ => {}
         }
@@ -116,6 +122,8 @@ fn extract_function(node: Node, src: &[u8]) -> Option<Symbol> {
     };
     let calls = hooks::filter_hook_calls(calls, &hooks);
 
+    let decorators = decorators::extract_decorators(node, src);
+
     Some(Symbol {
         signature: sig,
         line_start: node.start_position().row + 1,
@@ -125,6 +133,7 @@ fn extract_function(node: Node, src: &[u8]) -> Option<Symbol> {
         renders,
         hooks,
         handlers,
+        decorators,
     })
 }
 
@@ -170,6 +179,7 @@ fn extract_arrow(declarator: Node, src: &[u8]) -> Option<Symbol> {
         renders,
         hooks,
         handlers,
+        decorators: Vec::new(),
     })
 }
 
@@ -180,6 +190,8 @@ fn process_export(node: Node, src: &[u8], symbols: &mut FileSymbols) {
         extract_reexport(node, src, &mut symbols.reexports);
         return;
     }
+
+    let is_default = txt(node, src).starts_with("export default");
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -200,7 +212,136 @@ fn process_export(node: Node, src: &[u8], symbols: &mut FileSymbols) {
             "lexical_declaration" => {
                 process_lexical(child, src, true, &mut symbols.exports, None);
             }
+            "internal_module" | "module" => {
+                extract_namespace(child, src, symbols);
+            }
+            // ── Anonymous default exports ──
+            "function_expression" | "function" if is_default => {
+                if let Some(sym) = extract_default_function(child, node, src) {
+                    symbols.exports.push(sym);
+                }
+            }
+            "class" if is_default => {
+                extract_default_class(child, node, src, &mut symbols.exports);
+            }
+            "object" if is_default => {
+                symbols.exports.push(Symbol {
+                    signature: "default = {...}".to_string(),
+                    line_start: node.start_position().row + 1,
+                    line_end: node.end_position().row + 1,
+                    calls: Vec::new(),
+                    is_component: false,
+                    renders: Vec::new(),
+                    hooks: Vec::new(),
+                    handlers: Vec::new(),
+                    decorators: Vec::new(),
+                });
+            }
+            "identifier" if is_default => {
+                let name = txt(child, src);
+                symbols.exports.push(Symbol {
+                    signature: format!("default = {name}"),
+                    line_start: node.start_position().row + 1,
+                    line_end: node.end_position().row + 1,
+                    calls: Vec::new(),
+                    is_component: false,
+                    renders: Vec::new(),
+                    hooks: Vec::new(),
+                    handlers: Vec::new(),
+                    decorators: Vec::new(),
+                });
+            }
             _ => {}
+        }
+    }
+}
+
+/// Extract a `export default function() {}` or `export default function foo() {}`.
+fn extract_default_function(func: Node, export_node: Node, src: &[u8]) -> Option<Symbol> {
+    let sig = get_signature(func, src);
+    let has_name = func.child_by_field_name("name").is_some();
+    let final_sig = if has_name {
+        sig
+    } else {
+        format!("default {sig}")
+    };
+
+    if final_sig.is_empty() {
+        return None;
+    }
+
+    let body = func.child_by_field_name("body");
+    let is_component = jsx::returns_jsx(body);
+    let calls = calls::extract_calls(body, src);
+    let renders = if is_component {
+        jsx::extract_jsx_components(body, src)
+    } else {
+        Vec::new()
+    };
+    let (hooks, handlers) = if is_component {
+        body.map_or_else(Default::default, |b| {
+            hooks::extract_body_hooks_and_handlers(b, src)
+        })
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let calls = hooks::filter_hook_calls(calls, &hooks);
+
+    Some(Symbol {
+        signature: final_sig,
+        line_start: export_node.start_position().row + 1,
+        line_end: export_node.end_position().row + 1,
+        calls,
+        is_component,
+        renders,
+        hooks,
+        handlers,
+        decorators: Vec::new(),
+    })
+}
+
+/// Extract a `export default class {}` or `export default class Foo {}`.
+fn extract_default_class(
+    class_node: Node,
+    export_node: Node,
+    src: &[u8],
+    symbols: &mut Vec<Symbol>,
+) {
+    let class_sig = get_signature(class_node, src);
+    let trimmed = class_sig
+        .find("class ")
+        .map_or(&*class_sig, |i| &class_sig[i..]);
+    let has_name = class_node.child_by_field_name("name").is_some();
+    let sig = if has_name {
+        format!("class {}", trimmed.trim_start_matches("class "))
+    } else {
+        "default class".to_string()
+    };
+    let class_decorators = decorators::extract_decorators(class_node, src);
+
+    symbols.push(Symbol {
+        signature: sig,
+        line_start: export_node.start_position().row + 1,
+        line_end: export_node.end_position().row + 1,
+        calls: Vec::new(),
+        is_component: false,
+        renders: Vec::new(),
+        hooks: Vec::new(),
+        handlers: Vec::new(),
+        decorators: class_decorators,
+    });
+
+    if let Some(body) = class_node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for member in body.children(&mut cursor) {
+            if matches!(
+                member.kind(),
+                "method_definition" | "public_field_definition"
+            ) {
+                if let Some(sym) = extract_function(member, src) {
+                    symbols.push(sym);
+                }
+            }
         }
     }
 }
@@ -246,11 +387,16 @@ fn extract_reexport(node: Node, src: &[u8], reexports: &mut Vec<ReExport>) {
 
 fn extract_class(node: Node, src: &[u8], symbols: &mut Vec<Symbol>) {
     let class_sig = get_signature(node, src);
+    // Strip decorator prefix: "@Foo(...) class X" → "class X"
+    let trimmed = class_sig
+        .find("class ")
+        .map_or(&*class_sig, |i| &class_sig[i..]);
     let class_start = node.start_position().row + 1;
     let class_end = node.end_position().row + 1;
+    let class_decorators = decorators::extract_decorators(node, src);
 
     symbols.push(Symbol {
-        signature: format!("class {}", class_sig.trim_start_matches("class ")),
+        signature: format!("class {}", trimmed.trim_start_matches("class ")),
         line_start: class_start,
         line_end: class_end,
         calls: Vec::new(),
@@ -258,6 +404,7 @@ fn extract_class(node: Node, src: &[u8], symbols: &mut Vec<Symbol>) {
         renders: Vec::new(),
         hooks: Vec::new(),
         handlers: Vec::new(),
+        decorators: class_decorators,
     });
 
     if let Some(body) = node.child_by_field_name("body") {
@@ -359,6 +506,7 @@ fn try_unwrap_react_wrapper(declarator: Node, value: Node, src: &[u8]) -> Option
                     renders,
                     hooks,
                     handlers,
+                    decorators: Vec::new(),
                 });
             }
             _ => {}
@@ -412,6 +560,7 @@ fn extract_const(declarator: Node, value: Node, src: &[u8], exported: bool) -> O
         renders: Vec::new(),
         hooks: Vec::new(),
         handlers: Vec::new(),
+        decorators: Vec::new(),
     })
 }
 
@@ -460,6 +609,116 @@ fn value_summary(value: Node, src: &[u8]) -> String {
         }
         _ => String::new(),
     }
+}
+
+// ── Namespaces / Modules ──
+
+/// Search children for an `internal_module` or `module` node and extract it.
+///
+/// Handles the tree-sitter wrapping:
+/// - `namespace Foo {}` → `expression_statement` > `internal_module`
+/// - `declare module 'x' {}` → `ambient_declaration` > `module`
+fn try_extract_namespace_from(node: Node, src: &[u8], symbols: &mut FileSymbols) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "internal_module" | "module") {
+            extract_namespace(child, src, symbols);
+            return;
+        }
+    }
+}
+
+/// Extract a `namespace Foo {}` or `declare module 'name' {}`.
+///
+/// Follows the same pattern as `extract_class`: creates a Symbol for the
+/// namespace itself, then extracts exported members from its body.
+fn extract_namespace(node: Node, src: &[u8], symbols: &mut FileSymbols) {
+    let name = node
+        .child_by_field_name("name")
+        .map(|n| {
+            let t = txt(n, src);
+            trim_quotes(t).to_string()
+        })
+        .unwrap_or_default();
+
+    let keyword = if node.kind() == "module" {
+        "module"
+    } else {
+        "namespace"
+    };
+
+    symbols.internals.push(Symbol {
+        signature: format!("{keyword} {name}"),
+        line_start: node.start_position().row + 1,
+        line_end: node.end_position().row + 1,
+        calls: Vec::new(),
+        is_component: false,
+        renders: Vec::new(),
+        hooks: Vec::new(),
+        handlers: Vec::new(),
+        decorators: Vec::new(),
+    });
+
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
+
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        match child.kind() {
+            "export_statement" => {
+                process_export(child, src, symbols);
+            }
+            "function_declaration" => {
+                if let Some(sym) = extract_function(child, src) {
+                    symbols.internals.push(sym);
+                }
+            }
+            "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
+                if let Some(t) = types::extract_type_def(child, src, false) {
+                    symbols.types.push(t);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract only local import and re-export source specifiers (fast path).
+///
+/// Skips all function/class/type extraction. Used by reverse mode where only
+/// the import graph matters, not the full symbol table.
+pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    let mut sources = Vec::new();
+    let mut cursor = root.walk();
+
+    for node in root.children(&mut cursor) {
+        match node.kind() {
+            "import_statement" => {
+                if let Some(source_node) = node.child_by_field_name("source") {
+                    let path = trim_quotes(txt(source_node, src));
+                    if (path.starts_with('.') || path.starts_with("@/"))
+                        && !sources.iter().any(|s| s == path)
+                    {
+                        sources.push(path.to_string());
+                    }
+                }
+            }
+            "export_statement" => {
+                if let Some(source_node) = node.child_by_field_name("source") {
+                    let path = trim_quotes(txt(source_node, src));
+                    if (path.starts_with('.') || path.starts_with('@'))
+                        && !sources.iter().any(|s| s == path)
+                    {
+                        sources.push(path.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    sources
 }
 
 #[cfg(test)]
@@ -1287,5 +1546,253 @@ describe('suite', () => {
             ],
             "duplicate siblings should be merged and sorted"
         );
+    }
+
+    // ── Decorators ──
+
+    #[test]
+    fn class_with_decorator() {
+        let src = b"@Component({ selector: 'app' }) class App {}";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(!symbols.internals.is_empty());
+        assert_eq!(
+            symbols.internals[0].decorators,
+            vec!["Component"],
+            "should extract decorator name from call expression"
+        );
+    }
+
+    #[test]
+    fn member_with_decorator() {
+        let src = b"class Foo { @Input() title: string = ''; }";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        // internals[0] = class Foo, internals[1] = title member
+        assert!(
+            symbols.internals.len() >= 2,
+            "should extract class and member: {:?}",
+            symbols.internals.iter().map(|s| &s.signature).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            symbols.internals[1].decorators,
+            vec!["Input"],
+            "should extract member decorator"
+        );
+    }
+
+    #[test]
+    fn parameterless_decorator() {
+        let src = b"@sealed class Immutable {}";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].decorators,
+            vec!["sealed"],
+            "parameterless decorator should extract identifier"
+        );
+    }
+
+    #[test]
+    fn multiple_decorators() {
+        let src = b"@A() @B() class Multi {}";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(
+            symbols.internals[0].decorators,
+            vec!["A", "B"],
+            "should extract multiple decorators in order"
+        );
+    }
+
+    #[test]
+    fn no_decorators_empty() {
+        let src = b"function plain() { return 1; }";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(
+            symbols.internals[0].decorators.is_empty(),
+            "function without decorators should have empty vec"
+        );
+    }
+
+    // ── Anonymous default exports ──
+
+    #[test]
+    fn anonymous_default_function() {
+        let src = b"export default function() { return 1; }";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.exports.len(), 1);
+        assert!(
+            symbols.exports[0].signature.contains("default"),
+            "anonymous default function should have 'default' in sig: {}",
+            symbols.exports[0].signature
+        );
+    }
+
+    #[test]
+    fn anonymous_default_class() {
+        let src = b"export default class { foo() { return 1; } }";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(!symbols.exports.is_empty());
+        assert!(
+            symbols.exports[0].signature.contains("default class"),
+            "anonymous default class should have 'default class' sig: {}",
+            symbols.exports[0].signature
+        );
+    }
+
+    #[test]
+    fn default_export_object() {
+        let src = b"export default { a: 1, b: 2 };";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.exports.len(), 1);
+        assert!(
+            symbols.exports[0].signature.contains("default"),
+            "default object export should have 'default' sig: {}",
+            symbols.exports[0].signature
+        );
+    }
+
+    #[test]
+    fn default_export_identifier() {
+        let src = b"const foo = 42;\nexport default foo;";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let default_export = symbols.exports.iter().find(|s| s.signature.contains("default"));
+        assert!(
+            default_export.is_some(),
+            "should extract default identifier export"
+        );
+        assert!(
+            default_export.unwrap().signature.contains("foo"),
+            "should reference the identifier name: {}",
+            default_export.unwrap().signature
+        );
+    }
+
+    #[test]
+    fn named_default_function_still_works() {
+        let src = b"export default function myFunc() { return 1; }";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.exports.len(), 1);
+        assert!(
+            symbols.exports[0].signature.contains("myFunc"),
+            "named default function should keep its name: {}",
+            symbols.exports[0].signature
+        );
+    }
+
+    // ── Namespaces ──
+
+    #[test]
+    fn namespace_basic() {
+        let src = br"namespace Validation {
+  export function validate(s: string) { return s.length > 0; }
+}";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let ns = symbols.internals.iter().find(|s| s.signature.contains("namespace"));
+        assert!(ns.is_some(), "should extract namespace symbol");
+        assert!(
+            ns.unwrap().signature.contains("Validation"),
+            "namespace sig should contain name: {}",
+            ns.unwrap().signature
+        );
+
+        let validate = symbols.exports.iter().find(|s| s.signature.contains("validate"));
+        assert!(
+            validate.is_some(),
+            "should extract exported function from namespace"
+        );
+    }
+
+    #[test]
+    fn declare_module() {
+        let src = br"declare module 'express' {
+  interface Request { user: string; }
+}";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let m = symbols.internals.iter().find(|s| s.signature.contains("module"));
+        assert!(m.is_some(), "should extract module symbol");
+        assert!(
+            m.unwrap().signature.contains("express"),
+            "module sig should contain name: {}",
+            m.unwrap().signature
+        );
+    }
+
+    #[test]
+    fn exported_namespace() {
+        let src = br"export namespace Utils {
+  export function helper() { return true; }
+}";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let ns = symbols.internals.iter().find(|s| s.signature.contains("namespace"));
+        assert!(
+            ns.is_some(),
+            "exported namespace should be extracted"
+        );
+    }
+
+    // ── extract_sources_only ──
+
+    #[test]
+    fn extract_sources_only_finds_relative_imports() {
+        let src = b"import { X } from './foo';\nimport { Y } from './bar';";
+        let tree = parse_ts(src);
+        let sources = extract_sources_only(tree.root_node(), src);
+        assert_eq!(sources, vec!["./foo", "./bar"]);
+    }
+
+    #[test]
+    fn extract_sources_only_finds_alias_imports() {
+        let src = b"import { X } from '@/hooks/use-chat';";
+        let tree = parse_ts(src);
+        let sources = extract_sources_only(tree.root_node(), src);
+        assert_eq!(sources, vec!["@/hooks/use-chat"]);
+    }
+
+    #[test]
+    fn extract_sources_only_finds_reexport_sources() {
+        let src = b"export { X } from './module';";
+        let tree = parse_ts(src);
+        let sources = extract_sources_only(tree.root_node(), src);
+        assert_eq!(sources, vec!["./module"]);
+    }
+
+    #[test]
+    fn extract_sources_only_skips_external_imports() {
+        let src = b"import React from 'react';\nimport { X } from './local';";
+        let tree = parse_ts(src);
+        let sources = extract_sources_only(tree.root_node(), src);
+        assert_eq!(sources, vec!["./local"]);
+    }
+
+    #[test]
+    fn extract_sources_only_deduplicates() {
+        let src = b"import { X } from './foo';\nimport { Y } from './foo';";
+        let tree = parse_ts(src);
+        let sources = extract_sources_only(tree.root_node(), src);
+        assert_eq!(sources, vec!["./foo"]);
     }
 }

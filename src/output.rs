@@ -1,6 +1,9 @@
 use std::fmt;
+use std::path::Path;
 
-use crate::model::{write_test_tree, FileSymbols, Indented};
+use crate::error::XrayError;
+use crate::model::{write_test_tree, FileSummary, FileSymbols, Indented};
+use crate::{extract, parser, util};
 
 /// Complete digest of a single file, ready for display.
 pub struct FileDigest {
@@ -8,6 +11,83 @@ pub struct FileDigest {
     pub ext: String,
     pub total_lines: usize,
     pub symbols: FileSymbols,
+}
+
+impl FileDigest {
+    /// Build a full digest from a file path.
+    pub fn from_path(path: &Path) -> Result<Self, XrayError> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let (tree, source) = parser::parse_file(path)?;
+        let symbols = extract::extract_symbols(tree.root_node(), source.as_bytes());
+        let total_lines = source.lines().count();
+        let display_path = util::relative_path(path);
+
+        Ok(Self {
+            display_path,
+            ext,
+            total_lines,
+            symbols,
+        })
+    }
+
+    /// Compress into a compact summary for follow-mode children.
+    pub fn summarize(&self) -> FileSummary {
+        let export_names = self
+            .symbols
+            .exports
+            .iter()
+            .map(|s| extract_name_from_signature(&s.signature))
+            .collect();
+        let type_names = self
+            .symbols
+            .types
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        FileSummary {
+            display_path: self.display_path.clone(),
+            total_lines: self.total_lines,
+            export_names,
+            type_names,
+        }
+    }
+}
+
+/// Extract the primary identifier from a symbol signature.
+///
+/// `"function greet(name: string)"` → `"greet"`
+/// `"const App = (props)"` → `"App"`
+/// `"async function fetch()"` → `"fetch"`
+/// `"class MyService extends Base"` → `"MyService"`
+fn extract_name_from_signature(sig: &str) -> String {
+    let s = sig
+        .trim_start_matches("async ")
+        .trim_start_matches("const ")
+        .trim_start_matches("function ")
+        .trim_start_matches("class ");
+    s.split(['(', '=', '<', ' '])
+        .next()
+        .unwrap_or("?")
+        .trim()
+        .to_string()
+}
+
+impl fmt::Display for FileSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}  ({} lines)", self.display_path, self.total_lines)?;
+        if !self.export_names.is_empty() {
+            write!(f, "\n    exports: {}", self.export_names.join(", "))?;
+        }
+        if !self.type_names.is_empty() {
+            write!(f, "\n    types: {}", self.type_names.join(", "))?;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for FileDigest {
@@ -142,4 +222,68 @@ fn write_reexports(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::FileSummary;
+
+    #[test]
+    fn extract_name_from_signature_function() {
+        assert_eq!(
+            extract_name_from_signature("function greet(name: string)"),
+            "greet"
+        );
+    }
+
+    #[test]
+    fn extract_name_from_signature_const() {
+        assert_eq!(
+            extract_name_from_signature("const App = (props: Props)"),
+            "App"
+        );
+    }
+
+    #[test]
+    fn extract_name_from_signature_async() {
+        assert_eq!(
+            extract_name_from_signature("async function fetchData()"),
+            "fetchData"
+        );
+    }
+
+    #[test]
+    fn extract_name_from_signature_class() {
+        assert_eq!(
+            extract_name_from_signature("class MyService extends Base"),
+            "MyService"
+        );
+    }
+
+    #[test]
+    fn file_summary_display_format() {
+        let summary = FileSummary {
+            display_path: "src/hooks/use-chat.ts".to_string(),
+            total_lines: 360,
+            export_names: vec!["useChat".to_string()],
+            type_names: vec!["ChatMessage".to_string(), "ChatOptions".to_string()],
+        };
+        let output = format!("{summary}");
+        assert!(output.contains("src/hooks/use-chat.ts  (360 lines)"));
+        assert!(output.contains("exports: useChat"));
+        assert!(output.contains("types: ChatMessage, ChatOptions"));
+    }
+
+    #[test]
+    fn file_summary_empty_exports_and_types() {
+        let summary = FileSummary {
+            display_path: "src/empty.ts".to_string(),
+            total_lines: 5,
+            export_names: vec![],
+            type_names: vec![],
+        };
+        let output = format!("{summary}");
+        assert_eq!(output, "src/empty.ts  (5 lines)");
+    }
 }

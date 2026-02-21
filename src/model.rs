@@ -38,6 +38,7 @@ pub struct Symbol {
     pub renders: Vec<JsxNode>,
     pub hooks: Vec<Hook>,
     pub handlers: Vec<String>,
+    pub decorators: Vec<String>,
 }
 
 /// Wrapper for indented display of a value.
@@ -73,6 +74,11 @@ impl fmt::Display for Indented<'_, Symbol> {
                 }
                 write!(f, "{node}")?;
             }
+        }
+        if !sym.decorators.is_empty() {
+            let decorated: Vec<String> =
+                sym.decorators.iter().map(|d| format!("@{d}")).collect();
+            write!(f, "\n{}  decorators: {}", indent, decorated.join(", "))?;
         }
         Ok(())
     }
@@ -165,6 +171,14 @@ impl fmt::Display for Indented<'_, Hook> {
         }
         write!(f, "  [L{}-{}]", h.line_start, h.line_end)
     }
+}
+
+/// Compact representation of a file for follow-mode child nodes.
+pub struct FileSummary {
+    pub display_path: String,
+    pub total_lines: usize,
+    pub export_names: Vec<String>,
+    pub type_names: Vec<String>,
 }
 
 /// All symbols extracted from a single file.

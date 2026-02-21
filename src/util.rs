@@ -92,7 +92,7 @@ pub fn relative_path(path: &Path) -> String {
 }
 
 /// Find the git repository root for a directory.
-fn git_root(dir: &Path) -> Option<PathBuf> {
+pub fn git_root(dir: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(dir)
