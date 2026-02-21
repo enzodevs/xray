@@ -174,7 +174,7 @@ fn render_tree(children: &[DepNode], omitted: &[String], prefix: &str) {
 }
 
 /// Check if a resolved path matches noise patterns.
-fn is_noise_path(path: &Path) -> bool {
+pub(crate) fn is_noise_path(path: &Path) -> bool {
     let rel = crate::util::relative_path(path);
     is_noise_segment(&rel)
 }

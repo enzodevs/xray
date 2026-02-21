@@ -15,8 +15,10 @@ cargo build --release                        # optimized binary
 ```
 xray <file> [file2 ...]          # follow mode (default): tree with depth 1 + noise filter
 xray --depth 2 <file>            # follow with deeper recursion
-xray --all <file>                # follow without noise filtering
+xray --all <file>                # follow without noise filter
 xray --who <file>                # reverse: show who imports this file
+xray --trace <file>              # trace cross-file call chains (depth 3)
+xray --trace <file> -s <name>    # trace a specific symbol
 xray --no-follow <file>          # plain: single file digest only
 ```
 
@@ -24,12 +26,13 @@ xray --no-follow <file>          # plain: single file digest only
 
 | File | Role |
 |------|------|
-| `main.rs` | CLI arg parsing + dispatch |
+| `main.rs` | CLI arg parsing (Mode enum) + dispatch |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
+| `trace.rs` | `--trace`: cross-file call graph traversal + rendering |
 | `reverse.rs` | `--who`: project scanning, find importers |
 | `resolve.rs` | Import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
 | `output.rs` | `FileDigest::from_path`, `summarize()`, `FileSummary`, Display impls |
-| `model.rs` | Symbol, JsxNode, TypeDef, Hook, TestBlock, FileSummary, FileSymbols |
+| `model.rs` | Symbol, JsxNode, TypeDef, Hook, ImportBinding, TestBlock, FileSummary, FileSymbols |
 | `extract/mod.rs` | `extract_symbols` + `extract_sources_only` + integration tests |
 | `extract/jsx.rs` | JSX detection + hierarchy tree (`returns_jsx`, `extract_jsx_components`) |
 | `extract/hooks.rs` | React hooks extraction |

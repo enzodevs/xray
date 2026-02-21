@@ -64,8 +64,16 @@ impl FileDigest {
 /// `"const App = (props)"` → `"App"`
 /// `"async function fetch()"` → `"fetch"`
 /// `"class MyService extends Base"` → `"MyService"`
-fn extract_name_from_signature(sig: &str) -> String {
+/// `"public async send(msg: string)"` → `"send"`
+pub(crate) fn extract_name_from_signature(sig: &str) -> String {
     let s = sig
+        .trim_start_matches("public ")
+        .trim_start_matches("private ")
+        .trim_start_matches("protected ")
+        .trim_start_matches("static ")
+        .trim_start_matches("abstract ")
+        .trim_start_matches("override ")
+        .trim_start_matches("readonly ")
         .trim_start_matches("async ")
         .trim_start_matches("const ")
         .trim_start_matches("function ")
@@ -258,6 +266,30 @@ mod tests {
         assert_eq!(
             extract_name_from_signature("class MyService extends Base"),
             "MyService"
+        );
+    }
+
+    #[test]
+    fn extract_name_from_signature_public_async_method() {
+        assert_eq!(
+            extract_name_from_signature("public async send(msg: string)"),
+            "send"
+        );
+    }
+
+    #[test]
+    fn extract_name_from_signature_private_static_method() {
+        assert_eq!(
+            extract_name_from_signature("private static getInstance()"),
+            "getInstance"
+        );
+    }
+
+    #[test]
+    fn extract_name_from_signature_protected_method() {
+        assert_eq!(
+            extract_name_from_signature("protected onInit()"),
+            "onInit"
         );
     }
 

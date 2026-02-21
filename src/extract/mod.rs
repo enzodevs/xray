@@ -7,13 +7,14 @@ mod types;
 
 use tree_sitter::Node;
 
-use crate::model::{FileSymbols, Hook, ReExport, Symbol};
+use crate::model::{FileSymbols, Hook, ImportBinding, ReExport, Symbol};
 use crate::util::{trim_quotes, txt};
 
 /// Walk top-level children of the AST root and extract all symbols.
 pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
     let mut symbols = FileSymbols {
         imports: Vec::new(),
+        import_bindings: Vec::new(),
         reexports: Vec::new(),
         exports: Vec::new(),
         internals: Vec::new(),
@@ -27,6 +28,11 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
         match node.kind() {
             "import_statement" => {
                 extract_import(node, src, &mut symbols.imports);
+                extract_import_bindings(
+                    node,
+                    src,
+                    &mut symbols.import_bindings,
+                );
             }
             "export_statement" => {
                 process_export(node, src, &mut symbols);
@@ -77,6 +83,85 @@ fn extract_import(node: Node, src: &[u8], imports: &mut Vec<String>) {
         let path = trim_quotes(txt(source_node, src));
         if path.starts_with('.') || path.starts_with("@/") {
             imports.push(path.to_string());
+        }
+    }
+}
+
+/// Extract individual import bindings: which names come from which source.
+///
+/// Handles named (`{ foo, bar as baz }`), default (`import Foo`), and
+/// skips external packages (only local `./` and `@/` specifiers).
+fn extract_import_bindings(
+    node: Node,
+    src: &[u8],
+    bindings: &mut Vec<ImportBinding>,
+) {
+    let Some(source_node) = node.child_by_field_name("source") else {
+        return;
+    };
+    let source = trim_quotes(txt(source_node, src));
+    if !source.starts_with('.') && !source.starts_with("@/") {
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            // Default import: `import Foo from './mod'`
+            "identifier" => {
+                bindings.push(ImportBinding {
+                    local_name: txt(child, src).to_string(),
+                    source: source.to_string(),
+                    is_default: true,
+                });
+            }
+            "import_clause" => {
+                extract_clause_bindings(child, src, source, bindings);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk an `import_clause` node extracting default + named bindings.
+fn extract_clause_bindings(
+    clause: Node,
+    src: &[u8],
+    source: &str,
+    bindings: &mut Vec<ImportBinding>,
+) {
+    let mut cursor = clause.walk();
+    for child in clause.children(&mut cursor) {
+        match child.kind() {
+            // Default import within clause
+            "identifier" => {
+                bindings.push(ImportBinding {
+                    local_name: txt(child, src).to_string(),
+                    source: source.to_string(),
+                    is_default: true,
+                });
+            }
+            // Named imports: `{ foo, bar as baz }`
+            "named_imports" => {
+                let mut inner = child.walk();
+                for spec in child.children(&mut inner) {
+                    if spec.kind() == "import_specifier" {
+                        let name = spec
+                            .child_by_field_name("alias")
+                            .or_else(|| spec.child_by_field_name("name"))
+                            .map(|n| txt(n, src));
+                        if let Some(name) = name {
+                            bindings.push(ImportBinding {
+                                local_name: name.to_string(),
+                                source: source.to_string(),
+                                is_default: false,
+                            });
+                        }
+                    }
+                }
+            }
+            // Namespace imports (`* as ns`) — skip for v1
+            _ => {}
         }
     }
 }
@@ -1794,5 +1879,84 @@ describe('suite', () => {
         let tree = parse_ts(src);
         let sources = extract_sources_only(tree.root_node(), src);
         assert_eq!(sources, vec!["./foo"]);
+    }
+
+    // ── Import bindings ──
+
+    #[test]
+    fn import_bindings_named() {
+        let src = b"import { foo, bar } from './mod';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.import_bindings.len(), 2);
+        assert_eq!(symbols.import_bindings[0].local_name, "foo");
+        assert_eq!(symbols.import_bindings[0].source, "./mod");
+        assert!(!symbols.import_bindings[0].is_default);
+        assert_eq!(symbols.import_bindings[1].local_name, "bar");
+    }
+
+    #[test]
+    fn import_bindings_default() {
+        let src = b"import MyDefault from './mod';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.import_bindings.len(), 1);
+        assert_eq!(symbols.import_bindings[0].local_name, "MyDefault");
+        assert!(symbols.import_bindings[0].is_default);
+    }
+
+    #[test]
+    fn import_bindings_aliased() {
+        let src = b"import { original as aliased } from './mod';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.import_bindings.len(), 1);
+        assert_eq!(symbols.import_bindings[0].local_name, "aliased");
+    }
+
+    #[test]
+    fn import_bindings_mixed_default_and_named() {
+        let src = b"import Default, { foo, bar } from './mod';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.import_bindings.len(), 3);
+        let default_b = symbols
+            .import_bindings
+            .iter()
+            .find(|b| b.is_default)
+            .unwrap();
+        assert_eq!(default_b.local_name, "Default");
+        let named: Vec<&str> = symbols
+            .import_bindings
+            .iter()
+            .filter(|b| !b.is_default)
+            .map(|b| b.local_name.as_str())
+            .collect();
+        assert_eq!(named, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn import_bindings_skips_external_packages() {
+        let src = b"import React from 'react';\nimport { useState } from 'react';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert!(symbols.import_bindings.is_empty());
+    }
+
+    #[test]
+    fn import_bindings_namespace_skipped() {
+        let src = b"import * as ns from './mod';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert!(symbols.import_bindings.is_empty());
+    }
+
+    #[test]
+    fn import_bindings_at_alias() {
+        let src = b"import { api } from '@/lib/api';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.import_bindings.len(), 1);
+        assert_eq!(symbols.import_bindings[0].source, "@/lib/api");
     }
 }

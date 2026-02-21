@@ -84,6 +84,13 @@ impl fmt::Display for Indented<'_, Symbol> {
     }
 }
 
+/// A single name imported from another module.
+pub struct ImportBinding {
+    pub local_name: String,
+    pub source: String,
+    pub is_default: bool,
+}
+
 /// A re-export statement (`export { x } from './module'`).
 pub struct ReExport {
     pub names: Vec<String>,
@@ -184,6 +191,7 @@ pub struct FileSummary {
 /// All symbols extracted from a single file.
 pub struct FileSymbols {
     pub imports: Vec<String>,
+    pub import_bindings: Vec<ImportBinding>,
     pub reexports: Vec<ReExport>,
     pub exports: Vec<Symbol>,
     pub internals: Vec<Symbol>,

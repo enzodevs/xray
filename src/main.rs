@@ -12,6 +12,7 @@ mod output;
 mod parser;
 mod resolve;
 mod reverse;
+mod trace;
 mod util;
 
 use std::path::Path;
@@ -19,17 +20,25 @@ use std::path::Path;
 use error::XrayError;
 use output::FileDigest;
 
+/// Which processing mode to use.
+enum Mode {
+    Follow,
+    NoFollow,
+    Who,
+    Trace,
+}
+
 struct CliArgs {
-    no_follow: bool,
-    who: bool,
+    mode: Mode,
+    target_symbol: Option<String>,
     depth: Option<usize>,
     show_all: bool,
     files: Vec<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<CliArgs, String> {
-    let mut no_follow = false;
-    let mut who = false;
+    let mut mode_flags: Vec<&str> = Vec::new();
+    let mut target_symbol: Option<String> = None;
     let mut depth: Option<usize> = None;
     let mut show_all = false;
     let mut files = Vec::new();
@@ -37,9 +46,17 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
 
     while i < args.len() {
         match args[i].as_str() {
-            "--no-follow" => no_follow = true,
-            "--who" => who = true,
+            "--no-follow" => mode_flags.push("--no-follow"),
+            "--who" => mode_flags.push("--who"),
+            "--trace" => mode_flags.push("--trace"),
             "--all" => show_all = true,
+            "--symbol" | "-s" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--symbol requires a name argument".to_string());
+                }
+                target_symbol = Some(args[i].clone());
+            }
             "--depth" | "-d" => {
                 i += 1;
                 if i >= args.len() {
@@ -58,17 +75,30 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         i += 1;
     }
 
-    if no_follow && who {
-        return Err("--no-follow and --who are mutually exclusive".to_string());
+    if mode_flags.len() > 1 {
+        return Err(
+            "--no-follow, --who, and --trace are mutually exclusive".to_string(),
+        );
     }
 
-    if no_follow && depth.is_some() {
+    let mode = match mode_flags.first().copied() {
+        Some("--no-follow") => Mode::NoFollow,
+        Some("--who") => Mode::Who,
+        Some("--trace") => Mode::Trace,
+        _ => Mode::Follow,
+    };
+
+    if matches!(mode, Mode::NoFollow) && depth.is_some() {
         return Err("--no-follow and --depth are mutually exclusive".to_string());
     }
 
+    if target_symbol.is_some() && !matches!(mode, Mode::Trace) {
+        return Err("--symbol requires --trace".to_string());
+    }
+
     Ok(CliArgs {
-        no_follow,
-        who,
+        mode,
+        target_symbol,
         depth,
         show_all,
         files,
@@ -101,16 +131,24 @@ fn main() {
         if i > 0 && multi {
             println!("\n---\n");
         }
-        let result = if args.who {
-            reverse::run(path_str)
-        } else if args.no_follow {
-            process_file(path_str)
-        } else {
-            let config = follow::FollowConfig {
-                max_depth: args.depth.unwrap_or(1),
-                show_all: args.show_all,
-            };
-            follow::run(path_str, &config)
+        let result = match args.mode {
+            Mode::Trace => {
+                let config = trace::TraceConfig {
+                    max_depth: args.depth.unwrap_or(3),
+                    show_all: args.show_all,
+                    target_symbol: args.target_symbol.clone(),
+                };
+                trace::run(path_str, &config)
+            }
+            Mode::Who => reverse::run(path_str),
+            Mode::NoFollow => process_file(path_str),
+            Mode::Follow => {
+                let config = follow::FollowConfig {
+                    max_depth: args.depth.unwrap_or(1),
+                    show_all: args.show_all,
+                };
+                follow::run(path_str, &config)
+            }
         };
         if let Err(e) = result {
             eprintln!("xray: {e}");
@@ -131,9 +169,11 @@ fn print_help() {
     eprintln!("By default, follows local imports (depth 1) with noise filtering.");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --depth N, -d N    Max follow depth (default 1)");
+    eprintln!("  --depth N, -d N    Max follow/trace depth (default: 1 follow, 3 trace)");
     eprintln!("  --all              Show all followed files (disable noise filter)");
     eprintln!("  --who              Show files that import the target");
+    eprintln!("  --trace            Trace cross-file call chains from exports");
+    eprintln!("  --symbol N, -s N   Trace a specific symbol (requires --trace)");
     eprintln!("  --no-follow        Disable follow, show only the target file");
     eprintln!("  -h, --help         Show help");
     eprintln!();
@@ -148,21 +188,20 @@ mod tests {
     #[test]
     fn parse_args_default_is_follow() {
         let args = parse_args(&["file.ts".into()]).unwrap();
-        assert!(!args.no_follow);
-        assert!(!args.who);
+        assert!(matches!(args.mode, Mode::Follow));
         assert_eq!(args.files, vec!["file.ts"]);
     }
 
     #[test]
     fn parse_args_no_follow() {
         let args = parse_args(&["--no-follow".into(), "file.ts".into()]).unwrap();
-        assert!(args.no_follow);
+        assert!(matches!(args.mode, Mode::NoFollow));
     }
 
     #[test]
     fn parse_args_who() {
         let args = parse_args(&["--who".into(), "file.ts".into()]).unwrap();
-        assert!(args.who);
+        assert!(matches!(args.mode, Mode::Who));
     }
 
     #[test]
@@ -199,5 +238,67 @@ mod tests {
     fn parse_args_all_flag() {
         let args = parse_args(&["--all".into(), "file.ts".into()]).unwrap();
         assert!(args.show_all);
+    }
+
+    #[test]
+    fn parse_args_trace() {
+        let args = parse_args(&["--trace".into(), "file.ts".into()]).unwrap();
+        assert!(matches!(args.mode, Mode::Trace));
+    }
+
+    #[test]
+    fn parse_args_trace_with_symbol() {
+        let args = parse_args(&[
+            "--trace".into(),
+            "--symbol".into(),
+            "App".into(),
+            "file.ts".into(),
+        ])
+        .unwrap();
+        assert!(matches!(args.mode, Mode::Trace));
+        assert_eq!(args.target_symbol, Some("App".to_string()));
+    }
+
+    #[test]
+    fn parse_args_trace_with_short_symbol() {
+        let args = parse_args(&[
+            "--trace".into(),
+            "-s".into(),
+            "App".into(),
+            "file.ts".into(),
+        ])
+        .unwrap();
+        assert_eq!(args.target_symbol, Some("App".to_string()));
+    }
+
+    #[test]
+    fn parse_args_symbol_without_trace_errors() {
+        let result = parse_args(&["--symbol".into(), "App".into(), "file.ts".into()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_args_trace_and_who_exclusive() {
+        let result = parse_args(&["--trace".into(), "--who".into(), "file.ts".into()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_args_trace_and_no_follow_exclusive() {
+        let result = parse_args(&["--trace".into(), "--no-follow".into(), "file.ts".into()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_args_trace_with_depth() {
+        let args = parse_args(&[
+            "--trace".into(),
+            "--depth".into(),
+            "5".into(),
+            "file.ts".into(),
+        ])
+        .unwrap();
+        assert!(matches!(args.mode, Mode::Trace));
+        assert_eq!(args.depth, Some(5));
     }
 }
