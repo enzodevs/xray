@@ -20,14 +20,29 @@ pub(super) fn extract_symbols(root: Node, src: &[u8]) -> crate::model::FileSymbo
     symbols.imports = extract_sources_only(src);
 
     let mut cursor = root.walk();
+    let mut suppress_phantom_select = false;
+
     for node in root.children(&mut cursor) {
         if !node.is_named() || should_skip_node(node) {
             continue;
         }
 
+        // CREATE POLICY FOR SELECT causes tree-sitter-sequel to emit a phantom
+        // SELECT statement as a sibling — suppress it.
+        if suppress_phantom_select {
+            suppress_phantom_select = false;
+            if is_phantom_select_after_policy(node, src) {
+                continue;
+            }
+        }
+
         let Some((signature, calls)) = statement_signature_and_refs(node, src) else {
             continue;
         };
+
+        if signature.starts_with("CREATE POLICY") {
+            suppress_phantom_select = true;
+        }
 
         symbols.internals.push(Symbol {
             signature,
@@ -178,6 +193,12 @@ fn statement_signature_and_refs(node: Node, src: &[u8]) -> Option<(String, Vec<S
         return Some((signature, refs));
     }
 
+    if let Some(info) = recover_error_node(node, src) {
+        let signature = format_statement_signature(&info);
+        let refs = format_statement_refs(&info);
+        return Some((signature, refs));
+    }
+
     let signature = fallback_statement_signature(node, src)?;
     if should_skip_fallback_signature(&signature) {
         return None;
@@ -228,13 +249,134 @@ fn should_skip_fallback_signature(signature: &str) -> bool {
 
     if matches!(
         upper.as_str(),
-        "IF" | "THEN" | "ELSE" | "ELSIF" | "END" | "END;" | "END $$;" | "LEVEL SECURITY"
+        "IF" | "THEN" | "ELSE" | "ELSIF" | "BEGIN" | "END" | "END;" | "END $$;" | "LEVEL SECURITY"
     ) {
+        return true;
+    }
+
+    if upper.starts_with("BEGIN ")
+        && (upper.contains(" SELECT ")
+            || upper.contains(" IF ")
+            || upper.contains(" PERFORM ")
+            || upper.contains(" RAISE ")
+            || upper.contains(" RETURN "))
+    {
+        // Procedural fragment leaked from a `DO $$ ... $$` block split by the parser.
         return true;
     }
 
     // Orphan punctuation fragments (e.g. `)`).
     !trimmed.chars().any(char::is_alphanumeric)
+}
+
+// ---------------------------------------------------------------------------
+// ERROR node recovery — structured extraction for syntax tree-sitter-sequel
+// doesn't support (CREATE POLICY, DO $$ blocks).
+// ---------------------------------------------------------------------------
+
+fn recover_error_node(node: Node, src: &[u8]) -> Option<SqlStatementInfo> {
+    if node.kind() != "ERROR" {
+        return None;
+    }
+    let text = txt(node, src);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    recover_create_policy(trimmed).or_else(|| recover_do_block(trimmed))
+}
+
+/// Parse `CREATE POLICY <name> ON <table> ...` from ERROR node text.
+fn recover_create_policy(text: &str) -> Option<SqlStatementInfo> {
+    let upper = text.to_ascii_uppercase();
+    if !upper.starts_with("CREATE POLICY") {
+        return None;
+    }
+
+    // Tokenize: CREATE POLICY <name> ON <table> [FOR ...] [USING ...] [WITH ...]
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    // Minimum: CREATE POLICY name ON table → 5 tokens
+    if tokens.len() < 5 {
+        return None;
+    }
+
+    // Find ON keyword (case-insensitive) after the policy name
+    let on_pos = tokens
+        .iter()
+        .skip(3) // skip CREATE, POLICY, <name>
+        .position(|t| t.eq_ignore_ascii_case("ON"))?;
+    let table_idx = 3 + on_pos + 1;
+    if table_idx >= tokens.len() {
+        return None;
+    }
+
+    let table = tokens[table_idx];
+    // Strip trailing punctuation (e.g. `;`)
+    let table = table.trim_end_matches([';', ',']);
+    if table.is_empty() {
+        return None;
+    }
+
+    Some(SqlStatementInfo {
+        kind: "CREATE POLICY".to_string(),
+        target: Some(table.to_string()),
+        sources: Vec::new(),
+        joins: Vec::new(),
+        functions: Vec::new(),
+        ctes: Vec::new(),
+    })
+}
+
+/// Parse `DO $$ ... $$` or `DO $tag$ ... $tag$` from ERROR node text.
+/// Returns a minimal `SqlStatementInfo` with no refs (anonymous procedural block).
+fn recover_do_block(text: &str) -> Option<SqlStatementInfo> {
+    let upper = text.to_ascii_uppercase();
+    // Must start with DO followed by whitespace
+    if !upper.starts_with("DO") {
+        return None;
+    }
+    let after_do = &text[2..];
+    if !after_do.starts_with(|c: char| c.is_ascii_whitespace()) {
+        return None;
+    }
+    // The rest must contain a dollar-quote delimiter ($$ or $tag$)
+    let trimmed_rest = after_do.trim_start();
+    if !trimmed_rest.starts_with('$') {
+        return None;
+    }
+
+    Some(SqlStatementInfo {
+        kind: "DO".to_string(),
+        target: None,
+        sources: Vec::new(),
+        joins: Vec::new(),
+        functions: Vec::new(),
+        ctes: Vec::new(),
+    })
+}
+
+/// Returns `true` when a `statement` node looks like a phantom SELECT
+/// generated by tree-sitter-sequel fragmenting a `CREATE POLICY ... FOR SELECT`.
+fn is_phantom_select_after_policy(node: Node, src: &[u8]) -> bool {
+    if node.kind() != "statement" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.is_named() && (child.kind() == "select" || child.kind() == "select_expression") {
+            // A real SELECT would have a FROM clause or meaningful content.
+            // The phantom one typically starts with `USING (...)` or `WITH CHECK`.
+            let text_upper = txt(node, src).to_ascii_uppercase();
+            if text_upper.starts_with("SELECT USING")
+                || text_upper.starts_with("SELECT WITH")
+                || text_upper.starts_with("USING")
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn extract_statement_info(node: Node, src: &[u8]) -> Option<SqlStatementInfo> {
@@ -289,6 +431,21 @@ fn extract_statement_info(node: Node, src: &[u8]) -> Option<SqlStatementInfo> {
         }
     }
 
+    if matches!(
+        kind.as_str(),
+        "CREATE FUNCTION" | "CREATE OR REPLACE FUNCTION"
+    ) {
+        if let Some(create_function) = op_node {
+            merge_create_function_body_refs_if_plpgsql(
+                create_function,
+                src,
+                &mut sources,
+                &mut joins,
+                &mut functions,
+            );
+        }
+    }
+
     // CTE names are local aliases, not source tables.
     sources.retain(|s| !ctes.iter().any(|cte| cte == s));
     joins.retain(|s| !ctes.iter().any(|cte| cte == s));
@@ -308,6 +465,180 @@ fn extract_statement_info(node: Node, src: &[u8]) -> Option<SqlStatementInfo> {
     })
 }
 
+fn merge_create_function_body_refs_if_plpgsql(
+    create_function: Node,
+    src: &[u8],
+    sources: &mut Vec<String>,
+    joins: &mut Vec<String>,
+    functions: &mut Vec<String>,
+) {
+    if !matches!(
+        create_function.kind(),
+        "create_function" | "create_or_replace_function"
+    ) || !create_function_is_plpgsql(create_function, src)
+    {
+        return;
+    }
+
+    let Some(function_body) = find_direct_named_child(create_function, "function_body") else {
+        return;
+    };
+
+    let mut body_statements = Vec::new();
+    collect_statement_descendants(function_body, &mut body_statements);
+
+    for child in body_statements {
+        let Some(inner_info) = extract_statement_info(child, src) else {
+            continue;
+        };
+
+        merge_function_body_statement_info(inner_info, sources, joins, functions);
+    }
+
+    merge_reparsed_plpgsql_body_refs(function_body, src, sources, joins, functions);
+}
+
+fn merge_reparsed_plpgsql_body_refs(
+    function_body: Node,
+    src: &[u8],
+    sources: &mut Vec<String>,
+    joins: &mut Vec<String>,
+    functions: &mut Vec<String>,
+) {
+    let Some(body_text) = extract_dollar_quoted_body_text(function_body, src) else {
+        return;
+    };
+
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_sequel::LANGUAGE.into())
+        .is_err()
+    {
+        return;
+    }
+
+    let Some(tree) = parser.parse(body_text.as_bytes(), None) else {
+        return;
+    };
+    let body_src = body_text.as_bytes();
+
+    let mut cursor = tree.root_node().walk();
+    for node in tree.root_node().children(&mut cursor) {
+        if !node.is_named() || should_skip_node(node) {
+            continue;
+        }
+
+        let Some(inner_info) =
+            extract_statement_info(node, body_src).or_else(|| recover_error_node(node, body_src))
+        else {
+            continue;
+        };
+
+        merge_function_body_statement_info(inner_info, sources, joins, functions);
+    }
+}
+
+fn merge_function_body_statement_info(
+    inner_info: SqlStatementInfo,
+    sources: &mut Vec<String>,
+    joins: &mut Vec<String>,
+    functions: &mut Vec<String>,
+) {
+    let SqlStatementInfo {
+        target: inner_target,
+        sources: inner_sources,
+        joins: inner_joins,
+        functions: inner_functions,
+        ..
+    } = inner_info;
+
+    if let Some(target) = inner_target {
+        // CREATE FUNCTION already uses `target:` for the function name, so body write
+        // targets are folded into dependencies.
+        push_unique(sources, target);
+    }
+
+    for source in inner_sources {
+        push_unique(sources, source);
+    }
+    for join in inner_joins {
+        push_unique(joins, join);
+    }
+    for function in inner_functions {
+        push_unique(functions, function);
+    }
+}
+
+fn collect_statement_descendants<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
+    if node.kind() == "statement" {
+        out.push(node);
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        collect_statement_descendants(child, out);
+    }
+}
+
+fn extract_dollar_quoted_body_text(function_body: Node, src: &[u8]) -> Option<String> {
+    let mut first_quote = None;
+    let mut last_quote = None;
+
+    let mut cursor = function_body.walk();
+    for child in function_body.children(&mut cursor) {
+        if !child.is_named() || child.kind() != "dollar_quote" {
+            continue;
+        }
+        if first_quote.is_none() {
+            first_quote = Some(child);
+        }
+        last_quote = Some(child);
+    }
+
+    let start = first_quote?.end_byte();
+    let end = last_quote?.start_byte();
+    if end <= start {
+        return None;
+    }
+
+    let body = src.get(start..end)?;
+    let text = std::str::from_utf8(body).ok()?;
+    Some(text.to_string())
+}
+
+fn create_function_is_plpgsql(create_function: Node, src: &[u8]) -> bool {
+    let mut cursor = create_function.walk();
+    for child in create_function.children(&mut cursor) {
+        if !child.is_named() || child.kind() != "function_language" {
+            continue;
+        }
+
+        let mut inner = child.walk();
+        for lang_child in child.children(&mut inner) {
+            if !lang_child.is_named() || lang_child.kind() != "identifier" {
+                continue;
+            }
+            return txt(lang_child, src).trim().eq_ignore_ascii_case("plpgsql");
+        }
+    }
+
+    txt(create_function, src)
+        .to_ascii_uppercase()
+        .contains("LANGUAGE PLPGSQL")
+}
+
+fn find_direct_named_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    let found = node
+        .children(&mut cursor)
+        .find(|child| child.is_named() && child.kind() == kind);
+    found
+}
+
 fn detect_statement_kind(statement: Node) -> Option<(String, Option<Node>)> {
     const KNOWN: &[&str] = &[
         "create_materialized_view",
@@ -315,6 +646,7 @@ fn detect_statement_kind(statement: Node) -> Option<(String, Option<Node>)> {
         "create_view",
         "create_index",
         "create_function",
+        "create_or_replace_function",
         "create_type",
         "create_sequence",
         "create_schema",
@@ -751,6 +1083,7 @@ fn format_statement_signature(info: &SqlStatementInfo) -> String {
             parts.push(info.kind.clone());
             parts.push(target.to_string());
         }
+        ("DO", None) => parts.push("DO $$ [anonymous block]".to_string()),
         (_, None) => parts.push(info.kind.clone()),
     }
 
@@ -1025,5 +1358,256 @@ mod tests {
             alter.unwrap().calls.contains(&"target:users".to_string()),
             "should capture the table as target ref"
         );
+    }
+
+    // -- CREATE POLICY recovery --
+
+    #[test]
+    fn recover_create_policy_extracts_target_table() {
+        let info =
+            recover_create_policy("CREATE POLICY tenant_isolation ON users USING (tenant_id = 1)")
+                .unwrap();
+        assert_eq!(info.kind, "CREATE POLICY");
+        assert_eq!(info.target.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn recover_create_policy_schema_qualified_target() {
+        let info = recover_create_policy("CREATE POLICY p ON app.orders USING (true)").unwrap();
+        assert_eq!(info.target.as_deref(), Some("app.orders"));
+    }
+
+    #[test]
+    fn recover_create_policy_for_select_variant() {
+        let info = recover_create_policy(
+            "CREATE POLICY read_only ON users FOR SELECT USING (active = true)",
+        )
+        .unwrap();
+        assert_eq!(info.kind, "CREATE POLICY");
+        assert_eq!(info.target.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn recover_create_policy_returns_none_for_unrelated() {
+        assert!(recover_create_policy("CREATE TABLE users (id INT)").is_none());
+        assert!(recover_create_policy("SELECT 1").is_none());
+    }
+
+    #[test]
+    fn extract_symbols_create_policy_produces_target_ref() {
+        let src = br"CREATE POLICY tenant_isolation ON users USING (tenant_id = current_tenant());";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let policy = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.starts_with("CREATE POLICY"));
+        assert!(policy.is_some(), "should extract CREATE POLICY as a symbol");
+        assert!(
+            policy.unwrap().calls.contains(&"target:users".to_string()),
+            "should capture the table as target ref"
+        );
+    }
+
+    #[test]
+    fn extract_symbols_suppresses_phantom_select_after_create_policy() {
+        let src = br"
+            CREATE POLICY read_only ON users FOR SELECT USING (active = true);
+            CREATE TABLE orders (id INT);
+        ";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        // Should have CREATE POLICY + CREATE TABLE, but NOT a phantom SELECT
+        let signatures: Vec<&str> = symbols
+            .internals
+            .iter()
+            .map(|s| s.signature.as_str())
+            .collect();
+        assert!(
+            signatures.iter().any(|s| s.starts_with("CREATE POLICY")),
+            "should have CREATE POLICY: {signatures:?}"
+        );
+        assert!(
+            signatures.iter().any(|s| s.starts_with("CREATE TABLE")),
+            "should have CREATE TABLE: {signatures:?}"
+        );
+        // The phantom SELECT from FOR SELECT fragmentation should be suppressed
+        let phantom_selects: Vec<&&str> = signatures
+            .iter()
+            .filter(|s| {
+                s.to_ascii_uppercase().starts_with("SELECT USING")
+                    || s.to_ascii_uppercase().starts_with("SELECT WITH")
+            })
+            .collect();
+        assert!(
+            phantom_selects.is_empty(),
+            "phantom SELECT should be suppressed: {phantom_selects:?}"
+        );
+    }
+
+    // -- DO $$ block recovery --
+
+    #[test]
+    fn recover_do_block_simple() {
+        let info = recover_do_block("DO $$ BEGIN RAISE NOTICE 'hello'; END $$;").unwrap();
+        assert_eq!(info.kind, "DO");
+        assert!(info.target.is_none());
+    }
+
+    #[test]
+    fn recover_do_block_custom_dollar_tag() {
+        let info = recover_do_block("DO $body$ BEGIN PERFORM 1; END $body$;").unwrap();
+        assert_eq!(info.kind, "DO");
+    }
+
+    #[test]
+    fn recover_do_block_returns_none_for_non_do() {
+        assert!(recover_do_block("CREATE TABLE users (id INT)").is_none());
+        assert!(recover_do_block("DO_SOMETHING()").is_none());
+        assert!(recover_do_block("DONE").is_none());
+    }
+
+    #[test]
+    fn extract_symbols_collapses_do_block() {
+        let src = br"
+            DO $$ BEGIN
+                RAISE NOTICE 'migrating';
+            END $$;
+            SELECT 1;
+        ";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let do_sym = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.contains("DO $$"));
+        assert!(
+            do_sym.is_some(),
+            "should extract DO block: {:?}",
+            symbols
+                .internals
+                .iter()
+                .map(|s| &s.signature)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(do_sym.unwrap().signature, "DO $$ [anonymous block]");
+    }
+
+    #[test]
+    fn fallback_filters_begin_fragment() {
+        assert!(should_skip_fallback_signature("BEGIN"));
+    }
+
+    #[test]
+    fn fallback_filters_begin_plpgsql_fragment() {
+        assert!(should_skip_fallback_signature(
+            "BEGIN SELECT id INTO v_object_id FROM platform.fm__object WHERE api_name = 'x'; IF v_object_id IS NULL"
+        ));
+    }
+
+    #[test]
+    fn create_function_plpgsql_captures_body_refs() {
+        let src = br"
+CREATE FUNCTION normalize_object(p_input TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_result TEXT;
+BEGIN
+    SELECT coalesce(name, '') INTO v_result FROM objects WHERE id = p_input;
+    INSERT INTO audit_log (action, target) VALUES ('normalize', p_input);
+    UPDATE object_stats SET last_seen_at = now() WHERE object_id = p_input;
+    RETURN v_result;
+END;
+$$;
+";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let func = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.starts_with("CREATE FUNCTION normalize_object"))
+            .expect("should extract CREATE FUNCTION symbol");
+
+        assert!(func.calls.contains(&"target:normalize_object".to_string()));
+        assert!(func.calls.contains(&"source:objects".to_string()));
+        assert!(func.calls.contains(&"source:audit_log".to_string()));
+        assert!(func.calls.contains(&"source:object_stats".to_string()));
+        assert!(func.calls.contains(&"fn:coalesce".to_string()));
+        assert!(func.calls.contains(&"fn:now".to_string()));
+    }
+
+    #[test]
+    fn create_function_sql_no_duplicate_refs() {
+        let src = br"
+CREATE FUNCTION count_users()
+RETURNS INT
+LANGUAGE sql
+AS $$
+    SELECT count(*) FROM users;
+$$;
+";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let func = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.starts_with("CREATE FUNCTION count_users"))
+            .expect("should extract CREATE FUNCTION symbol");
+
+        let users_refs = func
+            .calls
+            .iter()
+            .filter(|c| c.as_str() == "source:users")
+            .count();
+        let count_refs = func
+            .calls
+            .iter()
+            .filter(|c| c.as_str() == "fn:count")
+            .count();
+
+        assert_eq!(users_refs, 1, "source:users should not be duplicated");
+        assert_eq!(count_refs, 1, "fn:count should not be duplicated");
+    }
+
+    #[test]
+    fn create_or_replace_function_plpgsql_captures_body_refs() {
+        let src = br"
+CREATE OR REPLACE FUNCTION emit_metadata_event()
+RETURNS INT
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO event_log (kind) VALUES ('metadata');
+    RETURN 1;
+END;
+$$;
+";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        let signatures: Vec<&str> = symbols
+            .internals
+            .iter()
+            .map(|s| s.signature.as_str())
+            .collect();
+
+        let func = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.contains("emit_metadata_event"))
+            .unwrap_or_else(|| {
+                panic!("should extract CREATE OR REPLACE FUNCTION symbol: {signatures:?}")
+            });
+
+        assert!(func
+            .calls
+            .contains(&"target:emit_metadata_event".to_string()));
+        assert!(func.calls.contains(&"source:event_log".to_string()));
     }
 }

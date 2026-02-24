@@ -2,6 +2,14 @@
 
 Status after commits up to `81f573c`.
 
+## Status (current implementation)
+
+- Gap 1 (`CREATE POLICY`) implemented via ERROR-node recovery + phantom `SELECT` suppression
+- Gap 2 (`DO $$ ... $$`) implemented via ERROR-node recovery + fallback noise filtering for leaked `BEGIN ...` fragments
+- Gap 3 (`CREATE FUNCTION` `plpgsql` body refs) implemented via hybrid approach:
+  - collect refs from parsed `function_body` statements when present
+  - reparse dollar-quoted body text as standalone SQL to recover refs missed in complex `plpgsql` bodies
+
 ## What works well
 
 - **Statement extraction**: SELECT, INSERT, UPDATE, DELETE, MERGE, CREATE TABLE/VIEW/INDEX/FUNCTION/TYPE/SCHEMA, ALTER TABLE
