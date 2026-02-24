@@ -2,12 +2,16 @@ use std::fmt;
 use std::path::Path;
 
 use crate::error::XrayError;
-use crate::model::{write_test_tree, FileSummary, FileSymbols, Indented};
-use crate::{extract, parser, util};
+use crate::lang::LanguageKind;
+use crate::model::{
+    indented_symbol, write_test_tree, FileSummary, FileSymbols, Indented, SymbolRefsLabel,
+};
+use crate::{parser, util};
 
 /// Complete digest of a single file, ready for display.
 pub struct FileDigest {
     pub display_path: String,
+    pub language_kind: LanguageKind,
     pub ext: String,
     pub total_lines: usize,
     pub symbols: FileSymbols,
@@ -22,13 +26,16 @@ impl FileDigest {
             .unwrap_or("")
             .to_string();
 
-        let (tree, source) = parser::parse_file(path)?;
-        let symbols = extract::extract_symbols(tree.root_node(), source.as_bytes());
-        let total_lines = source.lines().count();
+        let parsed = parser::parse_file(path)?;
+        let symbols = parsed
+            .language_kind
+            .extract_symbols(parsed.tree.root_node(), parsed.source.as_bytes());
+        let total_lines = parsed.source.lines().count();
         let display_path = util::relative_path(path);
 
         Ok(Self {
             display_path,
+            language_kind: parsed.language_kind,
             ext,
             total_lines,
             symbols,
@@ -43,12 +50,7 @@ impl FileDigest {
             .iter()
             .map(|s| extract_name_from_signature(&s.signature))
             .collect();
-        let type_names = self
-            .symbols
-            .types
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
+        let type_names = self.symbols.types.iter().map(|t| t.name.clone()).collect();
         FileSummary {
             display_path: self.display_path.clone(),
             total_lines: self.total_lines,
@@ -100,6 +102,11 @@ impl fmt::Display for FileSummary {
 
 impl fmt::Display for FileDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let symbol_refs_label = match self.language_kind.symbol_ref_label() {
+            "refs" => SymbolRefsLabel::Refs,
+            _ => SymbolRefsLabel::Calls,
+        };
+
         writeln!(
             f,
             "{}  ({}, {} lines)",
@@ -120,7 +127,7 @@ impl fmt::Display for FileDigest {
         if !self.symbols.exports.is_empty() {
             writeln!(f, "exports:")?;
             for sym in &self.symbols.exports {
-                writeln!(f, "{}", Indented("  ", sym))?;
+                writeln!(f, "{}", indented_symbol("  ", sym, symbol_refs_label))?;
             }
             if has_more_sections(&self.symbols, SectionAfter::Exports) {
                 writeln!(f)?;
@@ -130,7 +137,7 @@ impl fmt::Display for FileDigest {
         if !self.symbols.internals.is_empty() {
             writeln!(f, "internal:")?;
             for sym in &self.symbols.internals {
-                writeln!(f, "{}", Indented("  ", sym))?;
+                writeln!(f, "{}", indented_symbol("  ", sym, symbol_refs_label))?;
             }
             if has_more_sections(&self.symbols, SectionAfter::Internals) {
                 writeln!(f)?;
@@ -235,7 +242,35 @@ fn write_reexports(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FileSummary;
+    use crate::lang::LanguageKind;
+    use crate::model::{FileSummary, Symbol};
+
+    fn empty_symbols() -> FileSymbols {
+        FileSymbols {
+            imports: Vec::new(),
+            import_bindings: Vec::new(),
+            reexports: Vec::new(),
+            exports: Vec::new(),
+            internals: Vec::new(),
+            types: Vec::new(),
+            tests: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+
+    fn make_symbol(signature: &str, calls: Vec<&str>) -> Symbol {
+        Symbol {
+            signature: signature.to_string(),
+            line_start: 1,
+            line_end: 2,
+            calls: calls.into_iter().map(String::from).collect(),
+            is_component: false,
+            renders: Vec::new(),
+            hooks: Vec::new(),
+            handlers: Vec::new(),
+            decorators: Vec::new(),
+        }
+    }
 
     #[test]
     fn extract_name_from_signature_function() {
@@ -287,10 +322,7 @@ mod tests {
 
     #[test]
     fn extract_name_from_signature_protected_method() {
-        assert_eq!(
-            extract_name_from_signature("protected onInit()"),
-            "onInit"
-        );
+        assert_eq!(extract_name_from_signature("protected onInit()"), "onInit");
     }
 
     #[test]
@@ -317,5 +349,46 @@ mod tests {
         };
         let output = format!("{summary}");
         assert_eq!(output, "src/empty.ts  (5 lines)");
+    }
+
+    #[test]
+    fn file_digest_display_uses_ts_calls_label_even_for_structural_like_tokens() {
+        let mut symbols = empty_symbols();
+        symbols.internals.push(make_symbol(
+            "function weird()",
+            vec!["source:looks_like_sql_ref"],
+        ));
+
+        let digest = FileDigest {
+            display_path: "src/weird.ts".to_string(),
+            language_kind: LanguageKind::Ts,
+            ext: "ts".to_string(),
+            total_lines: 2,
+            symbols,
+        };
+
+        let rendered = format!("{digest}");
+        assert!(rendered.contains("calls: source:looks_like_sql_ref"));
+        assert!(!rendered.contains("refs: source:looks_like_sql_ref"));
+    }
+
+    #[test]
+    fn file_digest_display_uses_sql_refs_label_even_for_non_structural_tokens() {
+        let mut symbols = empty_symbols();
+        symbols
+            .internals
+            .push(make_symbol("SELECT 1", vec!["count"]));
+
+        let digest = FileDigest {
+            display_path: "queries/test.sql".to_string(),
+            language_kind: LanguageKind::Sql,
+            ext: "sql".to_string(),
+            total_lines: 1,
+            symbols,
+        };
+
+        let rendered = format!("{digest}");
+        assert!(rendered.contains("refs: count"));
+        assert!(!rendered.contains("calls: count"));
     }
 }

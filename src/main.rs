@@ -7,6 +7,8 @@
 mod error;
 mod extract;
 mod follow;
+mod lang;
+mod lsp;
 mod model;
 mod output;
 mod parser;
@@ -33,6 +35,7 @@ struct CliArgs {
     target_symbol: Option<String>,
     depth: Option<usize>,
     show_all: bool,
+    use_lsp: bool,
     files: Vec<String>,
 }
 
@@ -41,6 +44,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut target_symbol: Option<String> = None;
     let mut depth: Option<usize> = None;
     let mut show_all = false;
+    let mut use_lsp = false;
     let mut files = Vec::new();
     let mut i = 0;
 
@@ -50,6 +54,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--who" => mode_flags.push("--who"),
             "--trace" => mode_flags.push("--trace"),
             "--all" => show_all = true,
+            "--lsp" => use_lsp = true,
             "--symbol" | "-s" => {
                 i += 1;
                 if i >= args.len() {
@@ -76,9 +81,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     }
 
     if mode_flags.len() > 1 {
-        return Err(
-            "--no-follow, --who, and --trace are mutually exclusive".to_string(),
-        );
+        return Err("--no-follow, --who, and --trace are mutually exclusive".to_string());
     }
 
     let mode = match mode_flags.first().copied() {
@@ -96,11 +99,16 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         return Err("--symbol requires --trace".to_string());
     }
 
+    if use_lsp && !matches!(mode, Mode::Trace) {
+        return Err("--lsp requires --trace".to_string());
+    }
+
     Ok(CliArgs {
         mode,
         target_symbol,
         depth,
         show_all,
+        use_lsp,
         files,
     })
 }
@@ -137,6 +145,7 @@ fn main() {
                     max_depth: args.depth.unwrap_or(3),
                     show_all: args.show_all,
                     target_symbol: args.target_symbol.clone(),
+                    use_lsp: args.use_lsp,
                 };
                 trace::run(path_str, &config)
             }
@@ -173,6 +182,7 @@ fn print_help() {
     eprintln!("  --all              Show all followed files (disable noise filter)");
     eprintln!("  --who              Show files that import the target");
     eprintln!("  --trace            Trace cross-file call chains from exports");
+    eprintln!("  --lsp              Use LSP to resolve member calls (requires --trace)");
     eprintln!("  --symbol N, -s N   Trace a specific symbol (requires --trace)");
     eprintln!("  --no-follow        Disable follow, show only the target file");
     eprintln!("  -h, --help         Show help");
@@ -218,7 +228,12 @@ mod tests {
 
     #[test]
     fn parse_args_no_follow_and_depth_exclusive() {
-        let result = parse_args(&["--no-follow".into(), "--depth".into(), "2".into(), "file.ts".into()]);
+        let result = parse_args(&[
+            "--no-follow".into(),
+            "--depth".into(),
+            "2".into(),
+            "file.ts".into(),
+        ]);
         assert!(result.is_err());
     }
 
@@ -300,5 +315,24 @@ mod tests {
         .unwrap();
         assert!(matches!(args.mode, Mode::Trace));
         assert_eq!(args.depth, Some(5));
+    }
+
+    #[test]
+    fn parse_args_trace_with_lsp() {
+        let args = parse_args(&["--trace".into(), "--lsp".into(), "file.ts".into()]).unwrap();
+        assert!(matches!(args.mode, Mode::Trace));
+        assert!(args.use_lsp);
+    }
+
+    #[test]
+    fn parse_args_lsp_without_trace_errors() {
+        let result = parse_args(&["--lsp".into(), "file.ts".into()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_args_lsp_default_false() {
+        let args = parse_args(&["--trace".into(), "file.ts".into()]).unwrap();
+        assert!(!args.use_lsp);
     }
 }

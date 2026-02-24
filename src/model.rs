@@ -44,44 +44,106 @@ pub struct Symbol {
 /// Wrapper for indented display of a value.
 pub struct Indented<'a, T>(pub &'a str, pub &'a T);
 
+#[derive(Clone, Copy)]
+pub(crate) enum SymbolRefsLabel {
+    Auto,
+    Calls,
+    Refs,
+}
+
+pub(crate) struct SymbolIndented<'a> {
+    indent: &'a str,
+    symbol: &'a Symbol,
+    refs_label: SymbolRefsLabel,
+}
+
+pub(crate) fn indented_symbol<'a>(
+    indent: &'a str,
+    symbol: &'a Symbol,
+    refs_label: SymbolRefsLabel,
+) -> SymbolIndented<'a> {
+    SymbolIndented {
+        indent,
+        symbol,
+        refs_label,
+    }
+}
+
 impl fmt::Display for Indented<'_, Symbol> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Indented(indent, sym) = self;
-        let marker = if sym.is_component { "[component] " } else { "" };
+        fmt_symbol_with_refs_label(f, indent, sym, SymbolRefsLabel::Auto)
+    }
+}
+
+impl fmt::Display for SymbolIndented<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_symbol_with_refs_label(f, self.indent, self.symbol, self.refs_label)
+    }
+}
+
+fn fmt_symbol_with_refs_label(
+    f: &mut fmt::Formatter<'_>,
+    indent: &str,
+    sym: &Symbol,
+    refs_label: SymbolRefsLabel,
+) -> fmt::Result {
+    let label_for_calls = match refs_label {
+        SymbolRefsLabel::Calls => "calls",
+        SymbolRefsLabel::Refs => "refs",
+        SymbolRefsLabel::Auto => {
+            if sym.calls.iter().all(|c| is_structural_ref(c)) {
+                "refs"
+            } else {
+                "calls"
+            }
+        }
+    };
+
+    let marker = if sym.is_component { "[component] " } else { "" };
+    write!(
+        f,
+        "{}{marker}{}  [L{}-{}]",
+        indent, sym.signature, sym.line_start, sym.line_end
+    )?;
+    if !sym.hooks.is_empty() {
+        write!(f, "\n{indent}  hooks:")?;
+        let deeper = format!("{indent}    ");
+        for h in &sym.hooks {
+            write!(f, "\n{}", Indented(&deeper, h))?;
+        }
+    }
+    if !sym.handlers.is_empty() {
+        write!(f, "\n{}  handlers: {}", indent, sym.handlers.join(", "))?;
+    }
+    if !sym.calls.is_empty() {
         write!(
             f,
-            "{}{marker}{}  [L{}-{}]",
-            indent, sym.signature, sym.line_start, sym.line_end
+            "\n{}  {label_for_calls}: {}",
+            indent,
+            sym.calls.join(", ")
         )?;
-        if !sym.hooks.is_empty() {
-            write!(f, "\n{indent}  hooks:")?;
-            let deeper = format!("{indent}    ");
-            for h in &sym.hooks {
-                write!(f, "\n{}", Indented(&deeper, h))?;
-            }
-        }
-        if !sym.handlers.is_empty() {
-            write!(f, "\n{}  handlers: {}", indent, sym.handlers.join(", "))?;
-        }
-        if !sym.calls.is_empty() {
-            write!(f, "\n{}  calls: {}", indent, sym.calls.join(", "))?;
-        }
-        if !sym.renders.is_empty() {
-            write!(f, "\n{indent}  renders: ")?;
-            for (i, node) in sym.renders.iter().enumerate() {
-                if i > 0 {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{node}")?;
-            }
-        }
-        if !sym.decorators.is_empty() {
-            let decorated: Vec<String> =
-                sym.decorators.iter().map(|d| format!("@{d}")).collect();
-            write!(f, "\n{}  decorators: {}", indent, decorated.join(", "))?;
-        }
-        Ok(())
     }
+    if !sym.renders.is_empty() {
+        write!(f, "\n{indent}  renders: ")?;
+        for (i, node) in sym.renders.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{node}")?;
+        }
+    }
+    if !sym.decorators.is_empty() {
+        let decorated: Vec<String> = sym.decorators.iter().map(|d| format!("@{d}")).collect();
+        write!(f, "\n{}  decorators: {}", indent, decorated.join(", "))?;
+    }
+    Ok(())
+}
+
+fn is_structural_ref(value: &str) -> bool {
+    ["target:", "source:", "join:", "cte:", "fn:"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
 }
 
 /// A single name imported from another module.

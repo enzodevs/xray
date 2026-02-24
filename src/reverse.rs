@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::XrayError;
+use crate::lang::{self, LanguageKind};
 use crate::output::FileDigest;
-use crate::{extract, parser, resolve, util};
+use crate::{parser, resolve, util};
 
 /// Show who imports the target file by scanning the project.
 pub fn run(target_path: &str) -> Result<(), XrayError> {
@@ -20,10 +21,30 @@ pub fn run(target_path: &str) -> Result<(), XrayError> {
         .ok_or_else(|| XrayError::ParseFailed("not inside a git repository".to_string()))?;
 
     let path_config = target.parent().and_then(resolve::load_path_config);
+    let importers = find_importers(&git_root, &target, path_config.as_ref());
 
+    println!("── imported by ──");
+    println!();
+
+    if importers.is_empty() {
+        println!("  (no importers found)");
+    } else {
+        for (path, lines) in &importers {
+            println!("  {path}  ({lines} lines)");
+        }
+    }
+
+    Ok(())
+}
+
+fn find_importers(
+    project_root: &Path,
+    target: &Path,
+    path_config: Option<&resolve::PathConfig>,
+) -> Vec<(String, usize)> {
     let mut importers: Vec<(String, usize)> = Vec::new();
 
-    walk_project_files(&git_root, &mut |file_path| {
+    walk_project_files(project_root, &mut |file_path| {
         let Ok(canonical) = file_path.canonicalize() else {
             return;
         };
@@ -31,14 +52,17 @@ pub fn run(target_path: &str) -> Result<(), XrayError> {
             return;
         }
 
-        let Ok((tree, source)) = parser::parse_file(file_path) else {
+        let Ok(parsed) = parser::parse_file(file_path) else {
             return;
         };
-        let sources = extract::extract_sources_only(tree.root_node(), source.as_bytes());
+        let sources = parsed.language_kind.extract_dependency_specifiers_from_ast(
+            parsed.tree.root_node(),
+            parsed.source.as_bytes(),
+        );
 
         for specifier in &sources {
             let Some(resolved) =
-                resolve::resolve_import(specifier, file_path, path_config.as_ref())
+                resolve_source_specifier(parsed.language_kind, specifier, file_path, path_config)
             else {
                 continue;
             };
@@ -48,26 +72,15 @@ pub fn run(target_path: &str) -> Result<(), XrayError> {
             };
             if resolved_canonical == target {
                 let rel = util::relative_path(file_path);
-                let lines = source.lines().count();
+                let lines = parsed.source.lines().count();
                 importers.push((rel, lines));
                 break;
             }
         }
     });
 
-    println!("── imported by ──");
-    println!();
-
-    if importers.is_empty() {
-        println!("  (no importers found)");
-    } else {
-        importers.sort_by(|a, b| a.0.cmp(&b.0));
-        for (path, lines) in &importers {
-            println!("  {path}  ({lines} lines)");
-        }
-    }
-
-    Ok(())
+    importers.sort_by(|a, b| a.0.cmp(&b.0));
+    importers
 }
 
 /// Directories to skip when walking the project tree.
@@ -82,7 +95,7 @@ const SKIP_DIRS: &[&str] = &[
     "out",
 ];
 
-/// Recursively walk all `.ts`/`.tsx`/`.js`/`.jsx` files under a directory.
+/// Recursively walk supported source files under a directory.
 fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -101,7 +114,7 @@ fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) {
             }
         } else if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "ts" | "tsx" | "js" | "jsx") {
+                if lang::is_supported_extension(ext) {
                     files.push(path);
                 }
             }
@@ -119,6 +132,15 @@ fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) {
     }
 }
 
+fn resolve_source_specifier(
+    language_kind: LanguageKind,
+    specifier: &str,
+    from_file: &Path,
+    path_config: Option<&resolve::PathConfig>,
+) -> Option<PathBuf> {
+    language_kind.resolve_source_specifier(specifier, from_file, path_config)
+}
+
 fn should_skip_dir(name: &str) -> bool {
     name.starts_with('.') || SKIP_DIRS.contains(&name)
 }
@@ -126,6 +148,7 @@ fn should_skip_dir(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn should_skip_dir_skips_node_modules() {
@@ -149,5 +172,98 @@ mod tests {
         assert!(should_skip_dir("dist"));
         assert!(should_skip_dir("build"));
         assert!(should_skip_dir(".next"));
+    }
+
+    #[test]
+    fn walk_project_files_includes_sql_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.sql"), "select 1;").unwrap();
+        std::fs::write(dir.path().join("main.ts"), "export {};").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# nope").unwrap();
+
+        let mut seen = Vec::new();
+        walk_project_files(dir.path(), &mut |p| {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap().to_string();
+            seen.push(name);
+        });
+
+        assert!(seen.contains(&"main.sql".to_string()));
+        assert!(seen.contains(&"main.ts".to_string()));
+        assert!(!seen.contains(&"README.md".to_string()));
+    }
+
+    #[test]
+    fn find_importers_detects_sql_source_importer() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("child.sql");
+        let importer = dir.path().join("root.sql");
+
+        fs::write(&target, "SELECT 1;").unwrap();
+        fs::write(&importer, "SOURCE child.sql;").unwrap();
+
+        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None);
+        assert_eq!(importers.len(), 1);
+        assert!(importers[0].0.ends_with("root.sql"));
+        assert_eq!(importers[0].1, 1);
+    }
+
+    #[test]
+    fn find_importers_detects_ts_alias_importer_with_path_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let target = src.join("target.ts");
+        let importer = src.join("main.ts");
+        fs::write(&target, "export const x = 1;").unwrap();
+        fs::write(
+            &importer,
+            "import { x } from '@/target';\nexport const y = x;",
+        )
+        .unwrap();
+
+        let cfg = resolve::load_path_config(dir.path()).unwrap();
+        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg));
+
+        assert_eq!(importers.len(), 1);
+        assert!(importers[0].0.ends_with("main.ts"));
+        assert_eq!(importers[0].1, 2);
+    }
+
+    #[test]
+    fn find_importers_sql_does_not_use_ts_alias_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let target = src.join("target.ts");
+        let sql_importer = dir.path().join("root.sql");
+        fs::write(&target, "export const x = 1;").unwrap();
+        fs::write(&sql_importer, "SOURCE @/target;").unwrap();
+
+        let cfg = resolve::load_path_config(dir.path()).unwrap();
+        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg));
+
+        assert!(importers.is_empty());
     }
 }

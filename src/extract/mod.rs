@@ -2,6 +2,7 @@ mod calls;
 mod decorators;
 mod hooks;
 mod jsx;
+mod sql;
 mod tests_block;
 mod types;
 
@@ -10,9 +11,28 @@ use tree_sitter::Node;
 use crate::model::{FileSymbols, Hook, ImportBinding, ReExport, Symbol};
 use crate::util::{trim_quotes, txt};
 
-/// Walk top-level children of the AST root and extract all symbols.
-pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
-    let mut symbols = FileSymbols {
+/// TS/JS ecosystem extractor entrypoint (explicit backend boundary).
+pub(crate) fn extract_ts_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    extract_symbols(root, src)
+}
+
+/// SQL ecosystem extractor entrypoint (explicit backend boundary).
+pub(crate) fn extract_sql_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    sql::extract_symbols(root, src)
+}
+
+/// TS/JS ecosystem dependency extractor entrypoint (imports/re-exports only).
+pub(crate) fn extract_ts_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    extract_sources_only(root, src)
+}
+
+/// SQL ecosystem dependency extractor entrypoint (include/source directives).
+pub(crate) fn extract_sql_sources_only(src: &[u8]) -> Vec<String> {
+    sql::extract_sources_only(src)
+}
+
+fn empty_symbols() -> FileSymbols {
+    FileSymbols {
         imports: Vec::new(),
         import_bindings: Vec::new(),
         reexports: Vec::new(),
@@ -21,18 +41,19 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
         types: Vec::new(),
         tests: Vec::new(),
         hooks: Vec::new(),
-    };
+    }
+}
+
+/// Walk top-level children of the AST root and extract all symbols.
+pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    let mut symbols = empty_symbols();
 
     let mut cursor = root.walk();
     for node in root.children(&mut cursor) {
         match node.kind() {
             "import_statement" => {
                 extract_import(node, src, &mut symbols.imports);
-                extract_import_bindings(
-                    node,
-                    src,
-                    &mut symbols.import_bindings,
-                );
+                extract_import_bindings(node, src, &mut symbols.import_bindings);
             }
             "export_statement" => {
                 process_export(node, src, &mut symbols);
@@ -91,11 +112,7 @@ fn extract_import(node: Node, src: &[u8], imports: &mut Vec<String>) {
 ///
 /// Handles named (`{ foo, bar as baz }`), default (`import Foo`), and
 /// skips external packages (only local `./` and `@/` specifiers).
-fn extract_import_bindings(
-    node: Node,
-    src: &[u8],
-    bindings: &mut Vec<ImportBinding>,
-) {
+fn extract_import_bindings(node: Node, src: &[u8], bindings: &mut Vec<ImportBinding>) {
     let Some(source_node) = node.child_by_field_name("source") else {
         return;
     };
@@ -1212,7 +1229,8 @@ describe('suite', () => {
 
     #[test]
     fn extract_jsx_components_finds_uppercase_tags() {
-        let src = b"function App() { return <div><Header /><UserList users={[]} /><footer /></div>; }";
+        let src =
+            b"function App() { return <div><Header /><UserList users={[]} /><footer /></div>; }";
         let tree = parse_tsx(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
@@ -1221,8 +1239,14 @@ describe('suite', () => {
         assert_eq!(
             symbols.internals[0].renders,
             vec![
-                JsxNode { name: "Header".into(), children: vec![] },
-                JsxNode { name: "UserList".into(), children: vec![] },
+                JsxNode {
+                    name: "Header".into(),
+                    children: vec![]
+                },
+                JsxNode {
+                    name: "UserList".into(),
+                    children: vec![]
+                },
             ],
             "should only include uppercase component tags, not html elements"
         );
@@ -1292,7 +1316,10 @@ describe('suite', () => {
         assert!(symbols.internals[0].is_component);
         assert_eq!(
             symbols.internals[0].renders,
-            vec![JsxNode { name: "Header".into(), children: vec![] }],
+            vec![JsxNode {
+                name: "Header".into(),
+                children: vec![]
+            }],
             "should find components in parenthesized JSX return"
         );
     }
@@ -1576,7 +1603,10 @@ describe('suite', () => {
             symbols.internals[0].renders,
             vec![JsxNode {
                 name: "Card".into(),
-                children: vec![JsxNode { name: "Avatar".into(), children: vec![] }],
+                children: vec![JsxNode {
+                    name: "Avatar".into(),
+                    children: vec![]
+                }],
             }],
             "nested components should form a tree: Card > Avatar"
         );
@@ -1590,14 +1620,18 @@ describe('suite', () => {
 
         assert_eq!(
             symbols.internals[0].renders,
-            vec![JsxNode { name: "Badge".into(), children: vec![] }],
+            vec![JsxNode {
+                name: "Badge".into(),
+                children: vec![]
+            }],
             "HTML elements should be transparent, promoting children"
         );
     }
 
     #[test]
     fn jsx_tree_mixed_depth() {
-        let src = b"function App() { return <Layout><Header /><Content><List /></Content></Layout>; }";
+        let src =
+            b"function App() { return <Layout><Header /><Content><List /></Content></Layout>; }";
         let tree = parse_tsx(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
@@ -1608,9 +1642,15 @@ describe('suite', () => {
                 children: vec![
                     JsxNode {
                         name: "Content".into(),
-                        children: vec![JsxNode { name: "List".into(), children: vec![] }],
+                        children: vec![JsxNode {
+                            name: "List".into(),
+                            children: vec![]
+                        }],
                     },
-                    JsxNode { name: "Header".into(), children: vec![] },
+                    JsxNode {
+                        name: "Header".into(),
+                        children: vec![]
+                    },
                 ],
             }],
             "should preserve hierarchy with sorted children"
@@ -1626,8 +1666,14 @@ describe('suite', () => {
         assert_eq!(
             symbols.internals[0].renders,
             vec![
-                JsxNode { name: "Badge".into(), children: vec![] },
-                JsxNode { name: "Icon".into(), children: vec![] },
+                JsxNode {
+                    name: "Badge".into(),
+                    children: vec![]
+                },
+                JsxNode {
+                    name: "Icon".into(),
+                    children: vec![]
+                },
             ],
             "duplicate siblings should be merged and sorted"
         );
@@ -1659,7 +1705,11 @@ describe('suite', () => {
         assert!(
             symbols.internals.len() >= 2,
             "should extract class and member: {:?}",
-            symbols.internals.iter().map(|s| &s.signature).collect::<Vec<_>>()
+            symbols
+                .internals
+                .iter()
+                .map(|s| &s.signature)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             symbols.internals[1].decorators,
@@ -1756,7 +1806,10 @@ describe('suite', () => {
         let tree = parse_ts(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
-        let default_export = symbols.exports.iter().find(|s| s.signature.contains("default"));
+        let default_export = symbols
+            .exports
+            .iter()
+            .find(|s| s.signature.contains("default"));
         assert!(
             default_export.is_some(),
             "should extract default identifier export"
@@ -1792,7 +1845,10 @@ describe('suite', () => {
         let tree = parse_ts(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
-        let ns = symbols.internals.iter().find(|s| s.signature.contains("namespace"));
+        let ns = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.contains("namespace"));
         assert!(ns.is_some(), "should extract namespace symbol");
         assert!(
             ns.unwrap().signature.contains("Validation"),
@@ -1800,7 +1856,10 @@ describe('suite', () => {
             ns.unwrap().signature
         );
 
-        let validate = symbols.exports.iter().find(|s| s.signature.contains("validate"));
+        let validate = symbols
+            .exports
+            .iter()
+            .find(|s| s.signature.contains("validate"));
         assert!(
             validate.is_some(),
             "should extract exported function from namespace"
@@ -1815,7 +1874,10 @@ describe('suite', () => {
         let tree = parse_ts(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
-        let m = symbols.internals.iter().find(|s| s.signature.contains("module"));
+        let m = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.contains("module"));
         assert!(m.is_some(), "should extract module symbol");
         assert!(
             m.unwrap().signature.contains("express"),
@@ -1832,11 +1894,11 @@ describe('suite', () => {
         let tree = parse_ts(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
-        let ns = symbols.internals.iter().find(|s| s.signature.contains("namespace"));
-        assert!(
-            ns.is_some(),
-            "exported namespace should be extracted"
-        );
+        let ns = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.contains("namespace"));
+        assert!(ns.is_some(), "exported namespace should be extracted");
     }
 
     // ── extract_sources_only ──

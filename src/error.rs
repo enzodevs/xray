@@ -12,4 +12,13 @@ pub enum XrayError {
 
     #[error("parse failed: {0}")]
     ParseFailed(String),
+
+    #[error("{feature} is not supported for {language} files yet")]
+    UnsupportedFeature {
+        feature: &'static str,
+        language: &'static str,
+    },
+
+    #[error("lsp: {0}")]
+    Lsp(String),
 }
