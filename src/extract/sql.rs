@@ -129,7 +129,7 @@ fn strip_sql_comments(line: &str, in_block_comment: &mut bool) -> String {
 }
 
 fn strip_keyword_prefix<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
-    if line.len() < keyword.len() {
+    if line.len() < keyword.len() || !line.is_char_boundary(keyword.len()) {
         return None;
     }
 
@@ -194,7 +194,13 @@ fn fallback_statement_signature(node: Node, src: &[u8]) -> Option<String> {
     if compact.len() <= max_len {
         Some(compact)
     } else {
-        Some(format!("{}...", &compact[..max_len - 3]))
+        let truncate_at = compact
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= max_len - 3)
+            .last()
+            .unwrap_or(0);
+        Some(format!("{}...", &compact[..truncate_at]))
     }
 }
 
