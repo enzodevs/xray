@@ -178,7 +178,11 @@ fn statement_signature_and_refs(node: Node, src: &[u8]) -> Option<(String, Vec<S
         return Some((signature, refs));
     }
 
-    fallback_statement_signature(node, src).map(|sig| (sig, Vec::new()))
+    let signature = fallback_statement_signature(node, src)?;
+    if should_skip_fallback_signature(&signature) {
+        return None;
+    }
+    Some((signature, Vec::new()))
 }
 
 fn fallback_statement_signature(node: Node, src: &[u8]) -> Option<String> {
@@ -202,6 +206,35 @@ fn fallback_statement_signature(node: Node, src: &[u8]) -> Option<String> {
             .unwrap_or(0);
         Some(format!("{}...", &compact[..truncate_at]))
     }
+}
+
+fn should_skip_fallback_signature(signature: &str) -> bool {
+    let trimmed = signature.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if trimmed.starts_with('\\') {
+        // psql metacommands are already handled by `extract_sources_only` and are noise in
+        // statement output.
+        return true;
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+
+    if upper.starts_with("SET SEARCH_PATH") {
+        return true;
+    }
+
+    if matches!(
+        upper.as_str(),
+        "IF" | "THEN" | "ELSE" | "ELSIF" | "END" | "END;" | "END $$;" | "LEVEL SECURITY"
+    ) {
+        return true;
+    }
+
+    // Orphan punctuation fragments (e.g. `)`).
+    !trimmed.chars().any(char::is_alphanumeric)
 }
 
 fn extract_statement_info(node: Node, src: &[u8]) -> Option<SqlStatementInfo> {
@@ -917,5 +950,62 @@ mod tests {
                 "deploy.sql".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn fallback_filters_known_noise_fragments() {
+        assert!(should_skip_fallback_signature(")"));
+        assert!(should_skip_fallback_signature("IF"));
+        assert!(should_skip_fallback_signature("END $$;"));
+        assert!(should_skip_fallback_signature("LEVEL SECURITY"));
+        assert!(should_skip_fallback_signature(
+            "SET search_path TO app, public"
+        ));
+        assert!(should_skip_fallback_signature("\\echo 'applying'"));
+
+        assert!(!should_skip_fallback_signature("CREATE POLICY p ON users"));
+        assert!(!should_skip_fallback_signature(
+            "ALTER TABLE users ENABLE ROW"
+        ));
+    }
+
+    #[test]
+    fn extract_sql_filters_set_search_path_noise_statement() {
+        let src = br"
+            SET search_path TO app, public;
+            SELECT id FROM app.users;
+        ";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(symbols.internals.iter().all(|s| !s
+            .signature
+            .to_ascii_uppercase()
+            .starts_with("SET SEARCH_PATH")));
+        assert!(symbols
+            .internals
+            .iter()
+            .any(|s| s.signature.contains("SELECT") && s.signature.contains("app.users")));
+    }
+
+    #[test]
+    fn extract_sql_skips_psql_meta_blob_but_keeps_includes_as_imports() {
+        let src = br"
+            \echo 'Applying schema'
+            \i ./child.sql
+            SELECT 1;
+        ";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert!(symbols.imports.contains(&"./child.sql".to_string()));
+        assert!(symbols
+            .internals
+            .iter()
+            .all(|s| !s.signature.trim_start().starts_with('\\')));
+        assert!(symbols
+            .internals
+            .iter()
+            .any(|s| s.signature.contains("SELECT")));
     }
 }
