@@ -319,6 +319,7 @@ fn detect_statement_kind(statement: Node) -> Option<(String, Option<Node>)> {
         "create_sequence",
         "create_schema",
         "create_database",
+        "alter_table",
         "insert",
         "update",
         "delete",
@@ -1007,5 +1008,22 @@ mod tests {
             .internals
             .iter()
             .any(|s| s.signature.contains("SELECT")));
+    }
+
+    #[test]
+    fn extract_sql_alter_table_captures_target() {
+        let src = br"ALTER TABLE users ENABLE ROW LEVEL SECURITY;";
+        let tree = parse_sql(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        let alter = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.starts_with("ALTER TABLE"));
+        assert!(alter.is_some(), "should extract ALTER TABLE as a symbol");
+        assert!(
+            alter.unwrap().calls.contains(&"target:users".to_string()),
+            "should capture the table as target ref"
+        );
     }
 }
