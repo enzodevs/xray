@@ -1,6 +1,6 @@
 # xray
 
-Structural code digest for TypeScript/JavaScript files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, and line ranges**.
+Structural code digest for TypeScript/JavaScript and SQL files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, and line ranges**.
 
 Built for LLM context windows — feed xray output instead of raw source to save tokens while preserving structural understanding.
 
@@ -19,8 +19,15 @@ Requires Rust 1.70+.
 
 ## Usage
 
-```sh
-xray <file> [file2 ...]
+```
+xray <file> [file2 ...]          # follow mode (default): tree with depth 1 + noise filter
+xray --depth 2 <file>            # follow with deeper recursion
+xray --all <file>                # follow without noise filter
+xray --no-follow <file>          # single file digest only
+xray --who <file>                # show files that import the target
+xray --trace <file>              # trace cross-file call chains from exports
+xray --trace --lsp <file>        # trace with LSP-resolved member calls
+xray --trace -s <name> <file>    # trace a specific symbol
 ```
 
 ### React component (TSX)
@@ -88,7 +95,28 @@ types:
   export type Handler (req: Request, res: Response) => Promise<void>  [L10-10]
 ```
 
+### SQL
+
+```sh
+$ xray migrations/001_schema.sql
+```
+
+```
+migrations/001_schema.sql  (sql, 45 lines)
+
+includes: ./types.sql
+
+  CREATE TABLE users (id, name, email, created_at)  [L5-10]
+  CREATE INDEX idx_users_email  target: users  [L12-12]
+  CREATE FUNCTION get_active_users() RETURNS SETOF users  [L14-25]
+    refs: source: users
+  INSERT INTO roles (name)  target: roles  source: users  [L30-35]
+  SELECT … FROM orders JOIN users  source: orders  join: users  [L40-45]
+```
+
 ## What it extracts
+
+### TypeScript / JavaScript
 
 | Section | Content |
 |---------|---------|
@@ -108,13 +136,38 @@ Each function also shows:
 - **renders** — JSX component tree: `Layout > [Sidebar, Content > List]`
 - **line ranges** — `[L10-25]` for jumping to source
 
+### SQL
+
+| Section | Content |
+|---------|---------|
+| **includes** | `\i`, `\ir`, `SOURCE`, `@@`, `@` directives |
+| **statements** | CREATE TABLE/INDEX/FUNCTION, INSERT, UPDATE, DELETE, SELECT, MERGE, ALTER TABLE |
+| **refs** | `target:`, `source:`, `join:`, `cte:`, `fn:` references per statement |
+
+## Modes
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| **Follow** | *(default)* | Resolves local imports and shows a tree of digests (depth 1, noise filtered) |
+| **Follow deep** | `--depth N` | Same, with configurable recursion depth |
+| **No-follow** | `--no-follow` | Single file digest, no import resolution |
+| **Who** | `--who` | Reverse lookup — finds all project files that import the target |
+| **Trace** | `--trace` | Follows cross-file call chains from exports (depth 3) |
+| **Trace + LSP** | `--trace --lsp` | Resolves `this.method` and member calls via `typescript-language-server` |
+| **Trace symbol** | `--trace -s NAME` | Traces a single specific exported symbol |
+
+The `--all` flag disables noise filtering in follow and trace modes.
+
 ## Supported files
 
-`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.cts`
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.cts`, `.sql`
 
 ## How it works
 
 xray uses [tree-sitter](https://tree-sitter.github.io/) to parse source into a concrete syntax tree, then walks the AST to extract structural information. No regex, no string matching — just syntax-aware extraction.
+
+- **TypeScript/JavaScript**: `tree-sitter-typescript`
+- **SQL**: `tree-sitter-sequel`
 
 ## License
 
