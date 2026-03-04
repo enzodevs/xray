@@ -128,8 +128,8 @@ fn prescan_unrecognized_functions(src: &[u8]) -> Vec<Symbol> {
         };
 
         // Compute byte positions for the closing delimiter
-        let body_offset_in_text = func_keyword_end
-            + text[func_keyword_end..].find(body).unwrap_or(0);
+        let body_offset_in_text =
+            func_keyword_end + text[func_keyword_end..].find(body).unwrap_or(0);
         let dollar_len = text[func_keyword_end..].find('$').map_or(2, |p| {
             let delim_start = func_keyword_end + p;
             let delim_end = text[delim_start + 1..]
@@ -494,8 +494,9 @@ fn recover_do_block_from_source(
     // when tree-sitter splits the body into sibling nodes.
     if let Some(body) = extract_dollar_quoted_body_from_text(trimmed_rest) {
         reparse_body_and_collect_refs(body, &mut sources, &mut joins, &mut functions);
-    } else if let Some(full_from_do) =
-        src.get(error_start..).and_then(|b| std::str::from_utf8(b).ok())
+    } else if let Some(full_from_do) = src
+        .get(error_start..)
+        .and_then(|b| std::str::from_utf8(b).ok())
     {
         let after = &full_from_do[full_from_do.find('$')?..];
         if let Some(body) = extract_dollar_quoted_body_from_text(after) {
@@ -546,8 +547,9 @@ fn recover_create_function_from_source(
     // Try body from ERROR text first; fall back to full source scan
     if let Some(body) = extract_dollar_quoted_body_from_text(error_text) {
         reparse_body_and_collect_refs(body, &mut sources, &mut joins, &mut functions);
-    } else if let Some(full_text) =
-        src.get(error_start..).and_then(|b| std::str::from_utf8(b).ok())
+    } else if let Some(full_text) = src
+        .get(error_start..)
+        .and_then(|b| std::str::from_utf8(b).ok())
     {
         if let Some(body) = extract_dollar_quoted_body_from_text(full_text) {
             reparse_body_and_collect_refs(body, &mut sources, &mut joins, &mut functions);
@@ -1871,11 +1873,10 @@ SELECT 1;
         let tree = parse_sql(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
-        let leaked = symbols.internals.iter().find(|s| {
-            s.signature
-                .to_ascii_uppercase()
-                .starts_with("BEGIN INSERT")
-        });
+        let leaked = symbols
+            .internals
+            .iter()
+            .find(|s| s.signature.to_ascii_uppercase().starts_with("BEGIN INSERT"));
         assert!(
             leaked.is_none(),
             "leaked BEGIN fragment should be suppressed: {:?}",
@@ -2076,8 +2077,7 @@ $$;
             });
 
         assert!(
-            func.calls
-                .contains(&"target:trigger_handler".to_string()),
+            func.calls.contains(&"target:trigger_handler".to_string()),
             "should have target ref: {:?}",
             func.calls
         );
@@ -2128,7 +2128,10 @@ SELECT id FROM users;
 
         // The SELECT after the function should still be present
         assert!(
-            symbols.internals.iter().any(|s| s.signature.contains("users")),
+            symbols
+                .internals
+                .iter()
+                .any(|s| s.signature.contains("users")),
             "subsequent SELECT should be preserved: {:?}",
             symbols
                 .internals
@@ -2140,13 +2143,13 @@ SELECT id FROM users;
 
     #[test]
     fn recover_create_function_returns_none_for_unrelated() {
-        assert!(
-            recover_create_function_from_source("CREATE TABLE users", 0, b"CREATE TABLE users")
-                .is_none()
-        );
-        assert!(
-            recover_create_function_from_source("SELECT 1", 0, b"SELECT 1").is_none()
-        );
+        assert!(recover_create_function_from_source(
+            "CREATE TABLE users",
+            0,
+            b"CREATE TABLE users"
+        )
+        .is_none());
+        assert!(recover_create_function_from_source("SELECT 1", 0, b"SELECT 1").is_none());
     }
 
     #[test]

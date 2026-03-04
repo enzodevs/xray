@@ -727,6 +727,19 @@ mod tests {
     }
 
     #[test]
+    fn validate_trace_capabilities_rejects_py_trace() {
+        let cfg = default_trace_config();
+        let err = validate_trace_capabilities(LanguageKind::Py, &cfg).unwrap_err();
+        match err {
+            XrayError::UnsupportedFeature { feature, language } => {
+                assert_eq!(feature, "--trace");
+                assert_eq!(language, "Python");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn run_rejects_sql_files_in_trace_mode() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("query.sql");
@@ -739,6 +752,24 @@ mod tests {
             XrayError::UnsupportedFeature { feature, language } => {
                 assert_eq!(feature, "--trace");
                 assert_eq!(language, "SQL");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_py_files_in_trace_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.py");
+        std::fs::write(&file, "def run():\n    return 1").unwrap();
+
+        let cfg = default_trace_config();
+        let err = run(file.to_str().unwrap(), &cfg).unwrap_err();
+
+        match err {
+            XrayError::UnsupportedFeature { feature, language } => {
+                assert_eq!(feature, "--trace");
+                assert_eq!(language, "Python");
             }
             other => panic!("expected UnsupportedFeature, got {other:?}"),
         }

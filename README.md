@@ -1,6 +1,6 @@
 # xray
 
-Structural code digest for TypeScript/JavaScript and SQL files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, and line ranges**.
+Structural code digest for TypeScript/JavaScript, Python, and SQL files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, and line ranges**.
 
 Built for LLM context windows — feed xray output instead of raw source to save tokens while preserving structural understanding.
 
@@ -136,6 +136,20 @@ Each function also shows:
 - **renders** — JSX component tree: `Layout > [Sidebar, Content > List]`
 - **line ranges** — `[L10-25]` for jumping to source
 
+### Python
+
+| Section | Content |
+|---------|---------|
+| **imports** | `import` / `from ... import ...` dependencies (deduped) |
+| **exports** | Public top-level functions (by `__all__` when present, otherwise no leading `_`) |
+| **internal** | Non-public top-level functions |
+| **types** | Top-level classes/dataclasses with base classes + method summary |
+| **calls** | Function calls collected from function bodies |
+
+Notes:
+- `--trace` and `--lsp` are not supported for Python yet.
+- Import resolution for follow/who is local-project only (no virtualenv/site-packages).
+
 ### SQL
 
 | Section | Content |
@@ -157,16 +171,18 @@ Each function also shows:
 | **Trace symbol** | `--trace -s NAME` | Traces a single specific exported symbol |
 
 The `--all` flag disables noise filtering in follow and trace modes.
+`--trace` and `--lsp` currently support only TypeScript/JavaScript files.
 
 ## Supported files
 
-`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.cts`, `.sql`
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.py`, `.sql`
 
 ## How it works
 
 xray uses [tree-sitter](https://tree-sitter.github.io/) to parse source into a concrete syntax tree, then walks the AST to extract structural information. No regex, no string matching — just syntax-aware extraction.
 
 - **TypeScript/JavaScript**: `tree-sitter-typescript`
+- **Python**: `tree-sitter-python`
 - **SQL**: `tree-sitter-sequel`
 
 ## License

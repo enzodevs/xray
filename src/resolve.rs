@@ -1,3 +1,4 @@
+mod py;
 mod shared;
 mod sql;
 mod ts;
@@ -14,5 +15,6 @@ pub struct PathConfig {
     aliases: Vec<(String, Vec<String>)>,
 }
 
+pub(crate) use py::resolve_py_import;
 pub(crate) use sql::resolve_sql_include;
 pub(crate) use ts::{collect_sources, load_path_config, resolve_import};

@@ -1,6 +1,6 @@
 # xray
 
-Structural code digest for TS/JS and SQL files using tree-sitter. ~10x compression.
+Structural code digest for TS/JS, Python, and SQL files using tree-sitter. ~10x compression.
 
 ## Build & Verify
 
@@ -28,18 +28,20 @@ xray --no-follow <file>          # plain: single file digest only
 | File | Role |
 |------|------|
 | `main.rs` | CLI arg parsing (Mode enum) + dispatch |
-| `lang.rs` | `LanguageKind` enum (Ts/Sql): central dispatch for extraction, resolution, capabilities |
+| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py): central dispatch for extraction, resolution, capabilities |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
 | `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server` integration |
-| `reverse.rs` | `--who`: project scanning, find importers (TS + SQL) |
-| `resolve.rs` | Facade module re-exporting `resolve::ts` and `resolve::sql` |
+| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + SQL) |
+| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, and `resolve::sql` |
 | `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
+| `resolve/py.rs` | Python import resolution: relative (`.`/`..`) + local project modules/packages |
 | `resolve/sql.rs` | SQL include resolution: `resolve_sql_include` (bare + relative paths) |
 | `resolve/shared.rs` | Shared `try_extensions_with()` utility |
 | `output.rs` | `FileDigest::from_path`, `summarize()`, `FileSummary`, Display impls |
 | `model.rs` | Symbol, JsxNode, TypeDef, Hook, ImportBinding, TestBlock, FileSummary, FileSymbols, SymbolRefsLabel |
-| `extract/mod.rs` | Backend entrypoints: `extract_ts_symbols`, `extract_sql_symbols` + integration tests |
+| `extract/mod.rs` | Backend entrypoints: `extract_ts_symbols`, `extract_py_symbols`, `extract_sql_symbols` + integration tests |
+| `extract/python.rs` | Python extraction (imports, public/internal funcs, classes/dataclasses, calls, `__all__`) |
 | `extract/sql.rs` | SQL statement extraction (SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE) + include directives |
 | `extract/jsx.rs` | JSX detection + hierarchy tree (`returns_jsx`, `extract_jsx_components`) |
 | `extract/hooks.rs` | React hooks extraction |

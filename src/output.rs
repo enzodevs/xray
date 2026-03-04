@@ -65,6 +65,7 @@ impl FileDigest {
 /// `"function greet(name: string)"` → `"greet"`
 /// `"const App = (props)"` → `"App"`
 /// `"async function fetch()"` → `"fetch"`
+/// `"def run(user_id)"` → `"run"`
 /// `"class MyService extends Base"` → `"MyService"`
 /// `"public async send(msg: string)"` → `"send"`
 pub(crate) fn extract_name_from_signature(sig: &str) -> String {
@@ -77,6 +78,7 @@ pub(crate) fn extract_name_from_signature(sig: &str) -> String {
         .trim_start_matches("override ")
         .trim_start_matches("readonly ")
         .trim_start_matches("async ")
+        .trim_start_matches("def ")
         .trim_start_matches("const ")
         .trim_start_matches("function ")
         .trim_start_matches("class ");
@@ -302,6 +304,11 @@ mod tests {
             extract_name_from_signature("class MyService extends Base"),
             "MyService"
         );
+    }
+
+    #[test]
+    fn extract_name_from_signature_python_def() {
+        assert_eq!(extract_name_from_signature("def run(user_id: int)"), "run");
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::{extract, resolve};
 pub enum LanguageKind {
     Ts,
     Sql,
+    Py,
 }
 
 impl LanguageKind {
@@ -31,6 +32,9 @@ impl LanguageKind {
         if is_ts_ecosystem_extension(ext) {
             return Some(Self::Ts);
         }
+        if is_python_extension(ext) {
+            return Some(Self::Py);
+        }
         None
     }
 
@@ -39,6 +43,7 @@ impl LanguageKind {
         match self {
             Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
             Self::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Py => tree_sitter_python::LANGUAGE.into(),
         }
     }
 
@@ -46,7 +51,7 @@ impl LanguageKind {
     pub fn tree_sitter_language_for_extension(self, ext: &str) -> TsLanguage {
         match self {
             Self::Ts if matches_tsx_extension(ext) => tree_sitter_typescript::LANGUAGE_TSX.into(),
-            Self::Sql | Self::Ts => self.tree_sitter_language(),
+            Self::Sql | Self::Ts | Self::Py => self.tree_sitter_language(),
         }
     }
 
@@ -55,6 +60,7 @@ impl LanguageKind {
         match self {
             Self::Ts => extract::extract_ts_symbols(root, src),
             Self::Sql => extract::extract_sql_symbols(root, src),
+            Self::Py => extract::extract_py_symbols(root, src),
         }
     }
 
@@ -63,6 +69,7 @@ impl LanguageKind {
         match self {
             Self::Ts => extract::extract_ts_sources_only(root, src),
             Self::Sql => extract::extract_sql_sources_only(src),
+            Self::Py => extract::extract_py_sources_only(root, src),
         }
     }
 
@@ -71,7 +78,7 @@ impl LanguageKind {
         match self {
             Self::Ts => resolve::collect_sources(&symbols.imports, &symbols.reexports),
             // SQL includes are stored in `imports`; SQL has no re-export concept.
-            Self::Sql => dedupe_strings(&symbols.imports),
+            Self::Sql | Self::Py => dedupe_strings(&symbols.imports),
         }
     }
 
@@ -85,13 +92,14 @@ impl LanguageKind {
         match self {
             Self::Ts => resolve::resolve_import(specifier, from_file, path_config),
             Self::Sql => resolve::resolve_sql_include(specifier, from_file),
+            Self::Py => resolve::resolve_py_import(specifier, from_file),
         }
     }
 
     /// Human-facing label for symbol references in this ecosystem.
     pub fn symbol_ref_label(self) -> &'static str {
         match self {
-            Self::Ts => "calls",
+            Self::Ts | Self::Py => "calls",
             Self::Sql => "refs",
         }
     }
@@ -101,6 +109,7 @@ impl LanguageKind {
         match self {
             Self::Ts => "TypeScript/JavaScript",
             Self::Sql => "SQL",
+            Self::Py => "Python",
         }
     }
 
@@ -136,6 +145,10 @@ fn is_ts_ecosystem_extension(ext: &str) -> bool {
 
 fn matches_tsx_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("tsx") || ext.eq_ignore_ascii_case("jsx")
+}
+
+fn is_python_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("py")
 }
 
 fn dedupe_strings(items: &[String]) -> Vec<String> {
@@ -181,6 +194,8 @@ mod tests {
         assert_eq!(LanguageKind::for_extension("TSX"), Some(LanguageKind::Ts));
         assert_eq!(LanguageKind::for_extension("sql"), Some(LanguageKind::Sql));
         assert_eq!(LanguageKind::for_extension("SQL"), Some(LanguageKind::Sql));
+        assert_eq!(LanguageKind::for_extension("py"), Some(LanguageKind::Py));
+        assert_eq!(LanguageKind::for_extension("PY"), Some(LanguageKind::Py));
         assert_eq!(LanguageKind::for_extension("rs"), None);
     }
 
@@ -215,6 +230,20 @@ mod tests {
     }
 
     #[test]
+    fn py_backend_extracts_py_imports_only() {
+        let src = br"
+            import pkg.mod
+            from . import local
+        ";
+        let tree = parse_with(LanguageKind::Py, "py", src);
+        let deps = LanguageKind::Py.extract_dependency_specifiers_from_ast(tree.root_node(), src);
+        assert_eq!(
+            deps,
+            vec!["pkg.mod".to_string(), ".".to_string(), ".local".to_string()]
+        );
+    }
+
+    #[test]
     fn ts_and_sql_collect_dependency_specifiers_use_isolated_rules() {
         let mut symbols = empty_symbols();
         symbols.imports = vec!["./one".to_string(), "./one".to_string()];
@@ -226,9 +255,11 @@ mod tests {
 
         let ts_sources = LanguageKind::Ts.collect_dependency_specifiers(&symbols);
         let sql_sources = LanguageKind::Sql.collect_dependency_specifiers(&symbols);
+        let py_sources = LanguageKind::Py.collect_dependency_specifiers(&symbols);
 
         assert_eq!(ts_sources, vec!["./one".to_string(), "./two".to_string()]);
         assert_eq!(sql_sources, vec!["./one".to_string()]);
+        assert_eq!(py_sources, vec!["./one".to_string()]);
     }
 
     #[test]
@@ -279,6 +310,20 @@ mod tests {
     }
 
     #[test]
+    fn py_backend_resolves_relative_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        fs::create_dir(&pkg).unwrap();
+        let entry = pkg.join("main.py");
+        let target = pkg.join("utils.py");
+        fs::write(&entry, "").unwrap();
+        fs::write(&target, "").unwrap();
+
+        let resolved = LanguageKind::Py.resolve_source_specifier(".utils", &entry, None);
+        assert_eq!(resolved, Some(target));
+    }
+
+    #[test]
     fn ts_backend_uses_ts_path_alias_resolution() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
@@ -306,6 +351,7 @@ mod tests {
     fn symbol_ref_labels_are_language_specific() {
         assert_eq!(LanguageKind::Ts.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Sql.symbol_ref_label(), "refs");
+        assert_eq!(LanguageKind::Py.symbol_ref_label(), "calls");
     }
 
     #[test]
@@ -314,5 +360,7 @@ mod tests {
         assert!(LanguageKind::Ts.supports_lsp());
         assert!(!LanguageKind::Sql.supports_trace());
         assert!(!LanguageKind::Sql.supports_lsp());
+        assert!(!LanguageKind::Py.supports_trace());
+        assert!(!LanguageKind::Py.supports_lsp());
     }
 }

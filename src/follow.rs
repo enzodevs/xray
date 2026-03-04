@@ -320,4 +320,38 @@ mod tests {
             .display_path
             .ends_with("leaf.ts"));
     }
+
+    #[test]
+    fn build_subtree_follows_python_relative_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        fs::create_dir(&pkg).unwrap();
+        let root = pkg.join("main.py");
+        let child = pkg.join("dep.py");
+        let leaf = pkg.join("leaf.py");
+
+        fs::write(
+            &root,
+            "from . import dep\n\ndef run():\n    return dep.work()\n",
+        )
+        .unwrap();
+        fs::write(
+            &child,
+            "from . import leaf\n\ndef work():\n    return leaf.value()\n",
+        )
+        .unwrap();
+        fs::write(&leaf, "def value():\n    return 1\n").unwrap();
+
+        let mut visited = HashSet::new();
+        let tree = build_subtree(&root, 0, &follow_config(2), None, &mut visited).unwrap();
+
+        assert_eq!(tree.children.len(), 1);
+        assert!(tree.summary.display_path.ends_with("main.py"));
+        assert!(tree.children[0].summary.display_path.ends_with("dep.py"));
+        assert_eq!(tree.children[0].children.len(), 1);
+        assert!(tree.children[0].children[0]
+            .summary
+            .display_path
+            .ends_with("leaf.py"));
+    }
 }

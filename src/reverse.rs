@@ -74,8 +74,11 @@ fn extract_sql_function_name(signature: &str) -> Option<&str> {
 fn symbols_reference_functions(symbols: &FileSymbols, target_fn_names: &[String]) -> bool {
     symbols.internals.iter().any(|sym| {
         sym.calls.iter().any(|call| {
-            call.strip_prefix("fn:")
-                .is_some_and(|fn_name| target_fn_names.iter().any(|t| t.eq_ignore_ascii_case(fn_name)))
+            call.strip_prefix("fn:").is_some_and(|fn_name| {
+                target_fn_names
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(fn_name))
+            })
         })
     })
 }
@@ -127,10 +130,9 @@ fn find_importers(
         // Strategy 2: semantic function references (SQL only).
         // When the target defines SQL functions, also match files that call them.
         if !target_fn_names.is_empty() && parsed.language_kind == LanguageKind::Sql {
-            let file_symbols = parsed.language_kind.extract_symbols(
-                parsed.tree.root_node(),
-                parsed.source.as_bytes(),
-            );
+            let file_symbols = parsed
+                .language_kind
+                .extract_symbols(parsed.tree.root_node(), parsed.source.as_bytes());
             if symbols_reference_functions(&file_symbols, target_fn_names) {
                 let rel = util::relative_path(file_path);
                 let lines = parsed.source.lines().count();
@@ -239,6 +241,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.sql"), "select 1;").unwrap();
         std::fs::write(dir.path().join("main.ts"), "export {};").unwrap();
+        std::fs::write(dir.path().join("main.py"), "def run():\n    return 1").unwrap();
         std::fs::write(dir.path().join("README.md"), "# nope").unwrap();
 
         let mut seen = Vec::new();
@@ -249,6 +252,7 @@ mod tests {
 
         assert!(seen.contains(&"main.sql".to_string()));
         assert!(seen.contains(&"main.ts".to_string()));
+        assert!(seen.contains(&"main.py".to_string()));
         assert!(!seen.contains(&"README.md".to_string()));
     }
 
@@ -293,7 +297,8 @@ mod tests {
         .unwrap();
 
         let cfg = resolve::load_path_config(dir.path()).unwrap();
-        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]);
+        let importers =
+            find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]);
 
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("main.ts"));
@@ -322,7 +327,8 @@ mod tests {
         fs::write(&sql_importer, "SOURCE @/target;").unwrap();
 
         let cfg = resolve::load_path_config(dir.path()).unwrap();
-        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]);
+        let importers =
+            find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]);
 
         assert!(importers.is_empty());
     }
@@ -384,7 +390,8 @@ mod tests {
                 exports: Vec::new(),
                 internals: vec![
                     crate::model::Symbol {
-                        signature: "CREATE OR REPLACE FUNCTION get_tenant_id FROM tenants".to_string(),
+                        signature: "CREATE OR REPLACE FUNCTION get_tenant_id FROM tenants"
+                            .to_string(),
                         line_start: 1,
                         line_end: 20,
                         calls: vec!["target:get_tenant_id".to_string()],
@@ -426,10 +433,7 @@ mod tests {
             &target,
             "CREATE OR REPLACE FUNCTION get_tenant_id()\nRETURNS INT\nLANGUAGE plpgsql AS $$\nBEGIN\n  RETURN 1;\nEND;\n$$;",
         ).unwrap();
-        fs::write(
-            &caller,
-            "SELECT get_tenant_id(), name FROM tenants;",
-        ).unwrap();
+        fs::write(&caller, "SELECT get_tenant_id(), name FROM tenants;").unwrap();
 
         let target_fn_names = vec!["get_tenant_id".to_string()];
         let importers = find_importers(
@@ -449,7 +453,11 @@ mod tests {
         let target = dir.path().join("functions.sql");
         let unrelated = dir.path().join("other.sql");
 
-        fs::write(&target, "CREATE FUNCTION get_id() LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END; $$;").unwrap();
+        fs::write(
+            &target,
+            "CREATE FUNCTION get_id() LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END; $$;",
+        )
+        .unwrap();
         fs::write(&unrelated, "SELECT name FROM users;").unwrap();
 
         let target_fn_names = vec!["get_id".to_string()];
@@ -469,7 +477,11 @@ mod tests {
         let target = dir.path().join("functions.sql");
         let ts_file = dir.path().join("app.ts");
 
-        fs::write(&target, "CREATE FUNCTION my_func() LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END; $$;").unwrap();
+        fs::write(
+            &target,
+            "CREATE FUNCTION my_func() LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END; $$;",
+        )
+        .unwrap();
         // TS file happens to contain the text "my_func" but strategy 2 only runs for SQL files.
         fs::write(&ts_file, "const my_func = () => 1;\nexport { my_func };").unwrap();
 

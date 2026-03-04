@@ -2,6 +2,7 @@ mod calls;
 mod decorators;
 mod hooks;
 mod jsx;
+mod python;
 mod sql;
 mod tests_block;
 mod types;
@@ -21,6 +22,11 @@ pub(crate) fn extract_sql_symbols(root: Node, src: &[u8]) -> FileSymbols {
     sql::extract_symbols(root, src)
 }
 
+/// Python ecosystem extractor entrypoint (explicit backend boundary).
+pub(crate) fn extract_py_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    python::extract_symbols(root, src)
+}
+
 /// TS/JS ecosystem dependency extractor entrypoint (imports/re-exports only).
 pub(crate) fn extract_ts_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     extract_sources_only(root, src)
@@ -29,6 +35,11 @@ pub(crate) fn extract_ts_sources_only(root: Node, src: &[u8]) -> Vec<String> {
 /// SQL ecosystem dependency extractor entrypoint (include/source directives).
 pub(crate) fn extract_sql_sources_only(src: &[u8]) -> Vec<String> {
     sql::extract_sources_only(src)
+}
+
+/// Python ecosystem dependency extractor entrypoint (import statements only).
+pub(crate) fn extract_py_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    python::extract_sources_only(root, src)
 }
 
 fn empty_symbols() -> FileSymbols {
