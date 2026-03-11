@@ -41,6 +41,9 @@ fd -e ts -t f -E node_modules $FP/src/lib | head -5
 
 # SQL files (if sql extraction is relevant)
 fd -e sql -t f -E node_modules $FP/database | head -5
+
+# Markdown docs (if markdown extraction is relevant)
+rg --files -g '*.md' $FP | head -5
 ```
 
 ### Test matrix by mode
@@ -68,6 +71,8 @@ After building (`cargo build --release`), test each mode that your change could 
 7. **Noise filtering** — `ui/` and `components/ui/` paths collapsed (unless `--all`)
 8. **SQL refs** — SQL files show `refs:` (not `calls:`) with `target:`, `source:`, `join:`, `cte:`, `fn:` prefixes
 9. **SQL follow** — SQL include chains (`\i`, `SOURCE`, `@@`) resolve and build tree
+10. **Markdown digest** — `.md` files show headings, links, and code fences
+11. **Markdown follow/who** — local Markdown links resolve in follow and reverse lookup
 
 ### Workflow
 

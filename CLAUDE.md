@@ -1,6 +1,6 @@
 # xray
 
-Structural code digest for TS/JS, Python, and SQL files using tree-sitter. ~10x compression.
+Structural code and docs digest for TS/JS, Python, SQL, and Markdown files. ~10x compression.
 
 ## Build & Verify
 
@@ -28,19 +28,21 @@ xray --no-follow <file>          # plain: single file digest only
 | File | Role |
 |------|------|
 | `main.rs` | CLI arg parsing (Mode enum) + dispatch |
-| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py): central dispatch for extraction, resolution, capabilities |
+| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Md): central dispatch for extraction, resolution, capabilities |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
 | `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server` integration |
-| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + SQL) |
-| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, and `resolve::sql` |
+| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + SQL + Markdown links) |
+| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, `resolve::sql`, and `resolve::markdown` |
 | `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
 | `resolve/py.rs` | Python import resolution: relative (`.`/`..`) + local project modules/packages |
 | `resolve/sql.rs` | SQL include resolution: `resolve_sql_include` (bare + relative paths) |
+| `resolve/markdown.rs` | Markdown link resolution: local relative links + fragment stripping |
 | `resolve/shared.rs` | Shared `try_extensions_with()` utility |
 | `output.rs` | `FileDigest::from_path`, `summarize()`, `FileSummary`, Display impls |
-| `model.rs` | Symbol, JsxNode, TypeDef, Hook, ImportBinding, TestBlock, FileSummary, FileSymbols, SymbolRefsLabel |
-| `extract/mod.rs` | Backend entrypoints: `extract_ts_symbols`, `extract_py_symbols`, `extract_sql_symbols` + integration tests |
+| `model.rs` | Symbol, JsxNode, TypeDef, Hook, MarkdownDocument, FileSummary, FileContent, FileSymbols, SymbolRefsLabel |
+| `extract/mod.rs` | Backend entrypoints: TS/Python/SQL/Markdown extraction + integration tests |
+| `extract/markdown.rs` | Markdown extraction (headings, links, frontmatter, fenced code blocks) |
 | `extract/python.rs` | Python extraction (imports, public/internal funcs, classes/dataclasses, calls, `__all__`) |
 | `extract/sql.rs` | SQL statement extraction (SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE) + include directives |
 | `extract/jsx.rs` | JSX detection + hierarchy tree (`returns_jsx`, `extract_jsx_components`) |
@@ -49,7 +51,7 @@ xray --no-follow <file>          # plain: single file digest only
 | `extract/decorators.rs` | Decorator extraction (`@Component`, `@Input`, etc.) |
 | `extract/types.rs` | Type defs (interface, type alias, enum) |
 | `extract/tests_block.rs` | Test block extraction (describe/it/test) |
-| `parser.rs` | tree-sitter language detection + `ParsedFile` (tree + source + `LanguageKind`) |
+| `parser.rs` | tree-sitter code parsing + Markdown mdast parsing via `ParsedFile` |
 | `error.rs` | XrayError enum (thiserror) |
 | `util.rs` | txt(), trim_quotes(), compress_members(), is_noise(), git_root() |
 

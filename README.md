@@ -1,6 +1,6 @@
 # xray
 
-Structural code digest for TypeScript/JavaScript, Python, and SQL files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, and line ranges**.
+Structural code and docs digest for TypeScript/JavaScript, Python, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
 
 Built for LLM context windows — feed xray output instead of raw source to save tokens while preserving structural understanding.
 
@@ -114,6 +114,29 @@ includes: ./types.sql
   SELECT … FROM orders JOIN users  source: orders  join: users  [L40-45]
 ```
 
+### Markdown
+
+```sh
+$ xray README.md
+```
+
+```
+README.md  (md, 190 lines)
+
+headings:
+  H1 xray  [L1-1]
+  H2 Install  [L7-7]
+  H2 Usage  [L20-20]
+
+links:
+  external link: https://tree-sitter.github.io/  [L206-206]
+  local link: LICENSE  [L214-214]
+
+code fences:
+  sh  [L9-16]
+  text  [L22-30]
+```
+
 ## What it extracts
 
 ### TypeScript / JavaScript
@@ -158,6 +181,15 @@ Notes:
 | **statements** | CREATE TABLE/INDEX/FUNCTION, INSERT, UPDATE, DELETE, SELECT, MERGE, ALTER TABLE |
 | **refs** | `target:`, `source:`, `join:`, `cte:`, `fn:` references per statement |
 
+### Markdown
+
+| Section | Content |
+|---------|---------|
+| **frontmatter** | YAML/TOML frontmatter when present |
+| **headings** | Nested heading tree with line ranges |
+| **links** | Local and external links, including reference-style links |
+| **code fences** | Fenced code blocks with language labels |
+
 ## Modes
 
 | Mode | Flag | Description |
@@ -171,19 +203,20 @@ Notes:
 | **Trace symbol** | `--trace -s NAME` | Traces a single specific exported symbol |
 
 The `--all` flag disables noise filtering in follow and trace modes.
-`--trace` and `--lsp` currently support only TypeScript/JavaScript files.
+`--trace` and `--lsp` currently support only TypeScript/JavaScript files. For Markdown, follow and `--who` work on local links; trace is unsupported.
 
 ## Supported files
 
-`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.py`, `.sql`
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.py`, `.sql`, `.md`
 
 ## How it works
 
-xray uses [tree-sitter](https://tree-sitter.github.io/) to parse source into a concrete syntax tree, then walks the AST to extract structural information. No regex, no string matching — just syntax-aware extraction.
+xray uses [tree-sitter](https://tree-sitter.github.io/) for code files and a dedicated Markdown parser for `.md` files, then walks those parsed structures to extract structural information. No regex, no string matching — just syntax-aware extraction.
 
 - **TypeScript/JavaScript**: `tree-sitter-typescript`
 - **Python**: `tree-sitter-python`
 - **SQL**: `tree-sitter-sequel`
+- **Markdown**: `markdown`
 
 ## License
 
