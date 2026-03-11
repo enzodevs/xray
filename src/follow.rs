@@ -40,10 +40,7 @@ pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
 
     let path_config = entry.parent().and_then(resolve::load_path_config);
     let digest = FileDigest::from_path(&entry)?;
-
-    let sources = digest
-        .language_kind
-        .collect_dependency_specifiers(&digest.symbols);
+    let sources = digest.dependency_specifiers();
     print!("{digest}");
 
     if sources.is_empty() {
@@ -107,9 +104,7 @@ fn build_subtree(
     let mut omitted = Vec::new();
 
     if depth < config.max_depth {
-        let sources = digest
-            .language_kind
-            .collect_dependency_specifiers(&digest.symbols);
+        let sources = digest.dependency_specifiers();
 
         for specifier in &sources {
             let Some(resolved) =
@@ -353,5 +348,30 @@ mod tests {
             .summary
             .display_path
             .ends_with("leaf.py"));
+    }
+
+    #[test]
+    fn build_subtree_follows_markdown_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("README.md");
+        let guide = dir.path().join("docs").join("guide.md");
+        let api = dir.path().join("docs").join("api.md");
+        fs::create_dir(dir.path().join("docs")).unwrap();
+
+        fs::write(&root, "[Guide](docs/guide.md)").unwrap();
+        fs::write(&guide, "# Guide\n[API](./api.md)").unwrap();
+        fs::write(&api, "# API").unwrap();
+
+        let mut visited = HashSet::new();
+        let tree = build_subtree(&root, 0, &follow_config(2), None, &mut visited).unwrap();
+
+        assert_eq!(tree.children.len(), 1);
+        assert!(tree.summary.display_path.ends_with("README.md"));
+        assert!(tree.children[0].summary.display_path.ends_with("docs/guide.md"));
+        assert_eq!(tree.children[0].children.len(), 1);
+        assert!(tree.children[0].children[0]
+            .summary
+            .display_path
+            .ends_with("docs/api.md"));
     }
 }

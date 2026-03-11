@@ -2,6 +2,7 @@ mod calls;
 mod decorators;
 mod hooks;
 mod jsx;
+mod markdown;
 mod python;
 mod sql;
 mod tests_block;
@@ -9,7 +10,7 @@ mod types;
 
 use tree_sitter::Node;
 
-use crate::model::{FileSymbols, Hook, ImportBinding, ReExport, Symbol};
+use crate::model::{FileSymbols, Hook, ImportBinding, MarkdownDocument, ReExport, Symbol};
 use crate::util::{trim_quotes, txt};
 
 /// TS/JS ecosystem extractor entrypoint (explicit backend boundary).
@@ -27,6 +28,14 @@ pub(crate) fn extract_py_symbols(root: Node, src: &[u8]) -> FileSymbols {
     python::extract_symbols(root, src)
 }
 
+/// Markdown document extractor entrypoint.
+pub(crate) fn extract_markdown_document(
+    root: &::markdown::mdast::Node,
+    src: &str,
+) -> MarkdownDocument {
+    markdown::extract_document(root, src)
+}
+
 /// TS/JS ecosystem dependency extractor entrypoint (imports/re-exports only).
 pub(crate) fn extract_ts_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     extract_sources_only(root, src)
@@ -40,6 +49,11 @@ pub(crate) fn extract_sql_sources_only(src: &[u8]) -> Vec<String> {
 /// Python ecosystem dependency extractor entrypoint (import statements only).
 pub(crate) fn extract_py_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     python::extract_sources_only(root, src)
+}
+
+/// Markdown dependency extractor entrypoint (local links only).
+pub(crate) fn extract_markdown_sources_only(root: &::markdown::mdast::Node) -> Vec<String> {
+    markdown::extract_sources_only(root)
 }
 
 fn empty_symbols() -> FileSymbols {

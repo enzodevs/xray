@@ -48,8 +48,11 @@ fn extract_target_function_names(digest: &FileDigest) -> Vec<String> {
         return Vec::new();
     }
 
-    digest
-        .symbols
+    let Some(symbols) = digest.code_symbols() else {
+        return Vec::new();
+    };
+
+    symbols
         .internals
         .iter()
         .filter_map(|sym| extract_sql_function_name(&sym.signature))
@@ -104,10 +107,7 @@ fn find_importers(
         };
 
         // Strategy 1: file-level include directives (\i, SOURCE, @@)
-        let sources = parsed.language_kind.extract_dependency_specifiers_from_ast(
-            parsed.tree.root_node(),
-            parsed.source.as_bytes(),
-        );
+        let sources = parsed.dependency_specifiers();
 
         for specifier in &sources {
             let Some(resolved) =
@@ -130,13 +130,12 @@ fn find_importers(
         // Strategy 2: semantic function references (SQL only).
         // When the target defines SQL functions, also match files that call them.
         if !target_fn_names.is_empty() && parsed.language_kind == LanguageKind::Sql {
-            let file_symbols = parsed
-                .language_kind
-                .extract_symbols(parsed.tree.root_node(), parsed.source.as_bytes());
-            if symbols_reference_functions(&file_symbols, target_fn_names) {
-                let rel = util::relative_path(file_path);
-                let lines = parsed.source.lines().count();
-                importers.push((rel, lines));
+            if let crate::model::FileContent::Code(file_symbols) = parsed.extract_content() {
+                if symbols_reference_functions(&file_symbols, target_fn_names) {
+                    let rel = util::relative_path(file_path);
+                    let lines = parsed.source.lines().count();
+                    importers.push((rel, lines));
+                }
             }
         }
     });
@@ -253,7 +252,7 @@ mod tests {
         assert!(seen.contains(&"main.sql".to_string()));
         assert!(seen.contains(&"main.ts".to_string()));
         assert!(seen.contains(&"main.py".to_string()));
-        assert!(!seen.contains(&"README.md".to_string()));
+        assert!(seen.contains(&"README.md".to_string()));
     }
 
     #[test]
@@ -303,6 +302,23 @@ mod tests {
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("main.ts"));
         assert_eq!(importers[0].1, 2);
+    }
+
+    #[test]
+    fn find_importers_detects_markdown_linker() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        fs::create_dir(&docs).unwrap();
+        let target = docs.join("guide.md");
+        let importer = dir.path().join("README.md");
+
+        fs::write(&target, "# Guide").unwrap();
+        fs::write(&importer, "[Guide](docs/guide.md#intro)").unwrap();
+
+        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]);
+        assert_eq!(importers.len(), 1);
+        assert!(importers[0].0.ends_with("README.md"));
+        assert_eq!(importers[0].1, 1);
     }
 
     #[test]
@@ -362,7 +378,7 @@ mod tests {
             language_kind: LanguageKind::Ts,
             ext: "ts".to_string(),
             total_lines: 10,
-            symbols: crate::model::FileSymbols {
+            content: crate::model::FileContent::Code(crate::model::FileSymbols {
                 imports: Vec::new(),
                 import_bindings: Vec::new(),
                 reexports: Vec::new(),
@@ -371,7 +387,7 @@ mod tests {
                 types: Vec::new(),
                 tests: Vec::new(),
                 hooks: Vec::new(),
-            },
+            }),
         };
         assert!(extract_target_function_names(&digest).is_empty());
     }
@@ -383,7 +399,7 @@ mod tests {
             language_kind: LanguageKind::Sql,
             ext: "sql".to_string(),
             total_lines: 50,
-            symbols: crate::model::FileSymbols {
+            content: crate::model::FileContent::Code(crate::model::FileSymbols {
                 imports: Vec::new(),
                 import_bindings: Vec::new(),
                 reexports: Vec::new(),
@@ -416,7 +432,7 @@ mod tests {
                 types: Vec::new(),
                 tests: Vec::new(),
                 hooks: Vec::new(),
-            },
+            }),
         };
 
         let names = extract_target_function_names(&digest);

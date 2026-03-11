@@ -87,6 +87,9 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
 
     let digest = FileDigest::from_path(&entry)?;
     validate_trace_capabilities(digest.language_kind, config)?;
+    let Some(entry_symbols) = digest.code_symbols() else {
+        return Err(XrayError::ParseFailed(entry.display().to_string()));
+    };
     let path_config = entry.parent().and_then(resolve::load_path_config);
 
     let mut lsp = if config.use_lsp {
@@ -98,7 +101,7 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
                 // their type graphs (needed for member call resolution).
                 let mut import_paths: Vec<PathBuf> = Vec::new();
                 let mut seen_sources = HashSet::new();
-                for binding in &digest.symbols.import_bindings {
+                for binding in &entry_symbols.import_bindings {
                     if seen_sources.insert(&binding.source) {
                         if let Some(resolved) =
                             resolve::resolve_import(&binding.source, &entry, path_config.as_ref())
@@ -121,7 +124,7 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
 
     print!("{digest}");
 
-    let symbols = select_symbols(&digest.symbols, config.target_symbol.as_deref());
+    let symbols = select_symbols(entry_symbols, config.target_symbol.as_deref());
     if symbols.is_empty() {
         if let Some(name) = &config.target_symbol {
             eprintln!("xray: symbol '{name}' not found");
@@ -144,7 +147,7 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
 
             let children = build_call_tree(
                 &sym.calls,
-                &digest.symbols,
+                entry_symbols,
                 &entry,
                 (sym.line_start, sym.line_end),
                 1,
@@ -430,7 +433,17 @@ fn build_imported_node(
 
     let display_path = util::relative_path(&canonical);
 
-    let Some(export_sym) = find_export(&digest.symbols, export_name) else {
+    let Some(symbols) = digest.code_symbols() else {
+        return CallNode {
+            call_name: call_name.to_string(),
+            location: CallLocation::Unresolved {
+                reason: UnresolvedReason::ParseError,
+            },
+            children: Vec::new(),
+        };
+    };
+
+    let Some(export_sym) = find_export(symbols, export_name) else {
         return CallNode {
             call_name: call_name.to_string(),
             location: CallLocation::Imported {
@@ -447,7 +460,7 @@ fn build_imported_node(
     {
         build_call_tree(
             &export_sym.calls,
-            &digest.symbols,
+            symbols,
             &canonical,
             (export_sym.line_start, export_sym.line_end),
             depth + 1,
@@ -477,6 +490,7 @@ fn build_imported_node(
 /// definition, and if found, builds a call node that continues the trace.
 // Params carry the full traversal state needed to continue the trace.
 #[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines)]
 fn try_lsp_resolve(
     call_name: &str,
     file_path: &Path,
@@ -539,14 +553,15 @@ fn try_lsp_resolve(
     // that the LSP resolved to the same file). Build a Local node.
     if canonical_target == canonical_source {
         let digest = FileDigest::from_path(&canonical_source).ok()?;
-        let sym = find_symbol_at_line(&digest.symbols, target_line_1)?;
+        let symbols = digest.code_symbols()?;
+        let sym = find_symbol_at_line(symbols, target_line_1)?;
         let children = if depth < config.max_depth
             && !sym.calls.is_empty()
             && visited.insert((canonical_source.clone(), call_name.to_string()))
         {
             build_call_tree(
                 &sym.calls,
-                &digest.symbols,
+                symbols,
                 &canonical_source,
                 (sym.line_start, sym.line_end),
                 depth + 1,
@@ -573,8 +588,9 @@ fn try_lsp_resolve(
 
     let digest = FileDigest::from_path(&canonical_target).ok()?;
     let display_path = util::relative_path(&canonical_target);
+    let symbols = digest.code_symbols()?;
 
-    let sym = find_symbol_at_line(&digest.symbols, target_line_1);
+    let sym = find_symbol_at_line(symbols, target_line_1);
 
     let (lines, children) = if let Some(s) = sym {
         let sub = if depth < config.max_depth
@@ -583,7 +599,7 @@ fn try_lsp_resolve(
         {
             build_call_tree(
                 &s.calls,
-                &digest.symbols,
+                symbols,
                 &canonical_target,
                 (s.line_start, s.line_end),
                 depth + 1,
@@ -740,6 +756,19 @@ mod tests {
     }
 
     #[test]
+    fn validate_trace_capabilities_rejects_markdown_trace() {
+        let cfg = default_trace_config();
+        let err = validate_trace_capabilities(LanguageKind::Md, &cfg).unwrap_err();
+        match err {
+            XrayError::UnsupportedFeature { feature, language } => {
+                assert_eq!(feature, "--trace");
+                assert_eq!(language, "Markdown");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn run_rejects_sql_files_in_trace_mode() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("query.sql");
@@ -770,6 +799,24 @@ mod tests {
             XrayError::UnsupportedFeature { feature, language } => {
                 assert_eq!(feature, "--trace");
                 assert_eq!(language, "Python");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_markdown_files_in_trace_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("README.md");
+        std::fs::write(&file, "# Docs").unwrap();
+
+        let cfg = default_trace_config();
+        let err = run(file.to_str().unwrap(), &cfg).unwrap_err();
+
+        match err {
+            XrayError::UnsupportedFeature { feature, language } => {
+                assert_eq!(feature, "--trace");
+                assert_eq!(language, "Markdown");
             }
             other => panic!("expected UnsupportedFeature, got {other:?}"),
         }

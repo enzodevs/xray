@@ -1,8 +1,8 @@
 //! `xray` — Structural code digest for LLM context optimization.
 //!
-//! Compresses TypeScript/JavaScript source files to ~10% of their size,
-//! showing only structure: signatures, types, exports, imports, body hints,
-//! and line ranges.
+//! Compresses supported code and Markdown files to ~10% of their size,
+//! showing only structure: signatures, types, exports, imports, headings,
+//! links, code fences, body hints, and line ranges.
 
 mod error;
 mod extract;
@@ -187,8 +187,8 @@ fn print_help() {
     eprintln!("  --no-follow        Disable follow, show only the target file");
     eprintln!("  -h, --help         Show help");
     eprintln!();
-    eprintln!("Compresses source files to ~10% showing only structure:");
-    eprintln!("  signatures, types, exports, imports, body hints, line ranges");
+    eprintln!("Compresses supported files to ~10% showing only structure:");
+    eprintln!("  signatures, types, exports, imports, headings, links, body hints, line ranges");
 }
 
 #[cfg(test)]

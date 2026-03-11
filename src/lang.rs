@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tree_sitter::{Language as TsLanguage, Node};
 
 use crate::error::XrayError;
-use crate::model::FileSymbols;
+use crate::model::{FileContent, FileSymbols};
 use crate::{extract, resolve};
 
 /// Supported language ecosystems in xray.
@@ -16,6 +16,7 @@ pub enum LanguageKind {
     Ts,
     Sql,
     Py,
+    Md,
 }
 
 impl LanguageKind {
@@ -35,23 +36,30 @@ impl LanguageKind {
         if is_python_extension(ext) {
             return Some(Self::Py);
         }
+        if is_markdown_extension(ext) {
+            return Some(Self::Md);
+        }
         None
     }
 
     /// tree-sitter parser language for this ecosystem.
-    pub fn tree_sitter_language(self) -> TsLanguage {
+    pub fn tree_sitter_language(self) -> Result<TsLanguage, XrayError> {
         match self {
-            Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
-            Self::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Self::Py => tree_sitter_python::LANGUAGE.into(),
+            Self::Sql => Ok(tree_sitter_sequel::LANGUAGE.into()),
+            Self::Ts => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+            Self::Py => Ok(tree_sitter_python::LANGUAGE.into()),
+            Self::Md => Err(XrayError::UnsupportedFeature {
+                feature: "tree-sitter parser",
+                language: "Markdown",
+            }),
         }
     }
 
     /// tree-sitter parser language for JSX-capable files in the TS ecosystem.
-    pub fn tree_sitter_language_for_extension(self, ext: &str) -> TsLanguage {
+    pub fn tree_sitter_language_for_extension(self, ext: &str) -> Result<TsLanguage, XrayError> {
         match self {
-            Self::Ts if matches_tsx_extension(ext) => tree_sitter_typescript::LANGUAGE_TSX.into(),
-            Self::Sql | Self::Ts | Self::Py => self.tree_sitter_language(),
+            Self::Ts if matches_tsx_extension(ext) => Ok(tree_sitter_typescript::LANGUAGE_TSX.into()),
+            Self::Sql | Self::Ts | Self::Py | Self::Md => self.tree_sitter_language(),
         }
     }
 
@@ -61,6 +69,16 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_symbols(root, src),
             Self::Sql => extract::extract_sql_symbols(root, src),
             Self::Py => extract::extract_py_symbols(root, src),
+            Self::Md => FileSymbols {
+                imports: Vec::new(),
+                import_bindings: Vec::new(),
+                reexports: Vec::new(),
+                exports: Vec::new(),
+                internals: Vec::new(),
+                types: Vec::new(),
+                tests: Vec::new(),
+                hooks: Vec::new(),
+            },
         }
     }
 
@@ -70,15 +88,31 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_sources_only(root, src),
             Self::Sql => extract::extract_sql_sources_only(src),
             Self::Py => extract::extract_py_sources_only(root, src),
+            Self::Md => Vec::new(),
         }
     }
 
     /// Collect dependency specifiers from an already-extracted symbol table.
-    pub fn collect_dependency_specifiers(self, symbols: &FileSymbols) -> Vec<String> {
-        match self {
-            Self::Ts => resolve::collect_sources(&symbols.imports, &symbols.reexports),
+    pub fn collect_dependency_specifiers(self, content: &FileContent) -> Vec<String> {
+        match (self, content) {
+            (Self::Ts, FileContent::Code(symbols)) => {
+                resolve::collect_sources(&symbols.imports, &symbols.reexports)
+            }
             // SQL includes are stored in `imports`; SQL has no re-export concept.
-            Self::Sql | Self::Py => dedupe_strings(&symbols.imports),
+            (Self::Sql | Self::Py, FileContent::Code(symbols)) => dedupe_strings(&symbols.imports),
+            (Self::Md, FileContent::Markdown(document)) => document
+                .links
+                .iter()
+                .filter(|link| link.is_local)
+                .map(|link| link.target.clone())
+                .filter_map(|target| clean_markdown_target(&target))
+                .fold(Vec::new(), |mut out, target| {
+                    if !out.contains(&target) {
+                        out.push(target);
+                    }
+                    out
+                }),
+            _ => Vec::new(),
         }
     }
 
@@ -93,6 +127,7 @@ impl LanguageKind {
             Self::Ts => resolve::resolve_import(specifier, from_file, path_config),
             Self::Sql => resolve::resolve_sql_include(specifier, from_file),
             Self::Py => resolve::resolve_py_import(specifier, from_file),
+            Self::Md => resolve::resolve_markdown_link(specifier, from_file),
         }
     }
 
@@ -101,6 +136,7 @@ impl LanguageKind {
         match self {
             Self::Ts | Self::Py => "calls",
             Self::Sql => "refs",
+            Self::Md => "links",
         }
     }
 
@@ -110,6 +146,7 @@ impl LanguageKind {
             Self::Ts => "TypeScript/JavaScript",
             Self::Sql => "SQL",
             Self::Py => "Python",
+            Self::Md => "Markdown",
         }
     }
 
@@ -151,6 +188,25 @@ fn is_python_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("py")
 }
 
+fn is_markdown_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("md")
+}
+
+fn clean_markdown_target(target: &str) -> Option<String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let cutoff = trimmed.find(['#', '?']).unwrap_or(trimmed.len());
+    let cleaned = trimmed[..cutoff].trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
 fn dedupe_strings(items: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for item in items {
@@ -170,7 +226,7 @@ mod tests {
     fn parse_with(kind: LanguageKind, ext: &str, src: &[u8]) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&kind.tree_sitter_language_for_extension(ext))
+            .set_language(&kind.tree_sitter_language_for_extension(ext).unwrap())
             .unwrap();
         parser.parse(src, None).unwrap()
     }
@@ -196,6 +252,7 @@ mod tests {
         assert_eq!(LanguageKind::for_extension("SQL"), Some(LanguageKind::Sql));
         assert_eq!(LanguageKind::for_extension("py"), Some(LanguageKind::Py));
         assert_eq!(LanguageKind::for_extension("PY"), Some(LanguageKind::Py));
+        assert_eq!(LanguageKind::for_extension("md"), Some(LanguageKind::Md));
         assert_eq!(LanguageKind::for_extension("rs"), None);
     }
 
@@ -253,9 +310,10 @@ mod tests {
             is_type: false,
         }];
 
-        let ts_sources = LanguageKind::Ts.collect_dependency_specifiers(&symbols);
-        let sql_sources = LanguageKind::Sql.collect_dependency_specifiers(&symbols);
-        let py_sources = LanguageKind::Py.collect_dependency_specifiers(&symbols);
+        let content = FileContent::Code(symbols);
+        let ts_sources = LanguageKind::Ts.collect_dependency_specifiers(&content);
+        let sql_sources = LanguageKind::Sql.collect_dependency_specifiers(&content);
+        let py_sources = LanguageKind::Py.collect_dependency_specifiers(&content);
 
         assert_eq!(ts_sources, vec!["./one".to_string(), "./two".to_string()]);
         assert_eq!(sql_sources, vec!["./one".to_string()]);
@@ -352,6 +410,7 @@ mod tests {
         assert_eq!(LanguageKind::Ts.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Sql.symbol_ref_label(), "refs");
         assert_eq!(LanguageKind::Py.symbol_ref_label(), "calls");
+        assert_eq!(LanguageKind::Md.symbol_ref_label(), "links");
     }
 
     #[test]
@@ -362,5 +421,7 @@ mod tests {
         assert!(!LanguageKind::Sql.supports_lsp());
         assert!(!LanguageKind::Py.supports_trace());
         assert!(!LanguageKind::Py.supports_lsp());
+        assert!(!LanguageKind::Md.supports_trace());
+        assert!(!LanguageKind::Md.supports_lsp());
     }
 }

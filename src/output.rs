@@ -4,7 +4,8 @@ use std::path::Path;
 use crate::error::XrayError;
 use crate::lang::LanguageKind;
 use crate::model::{
-    indented_symbol, write_test_tree, FileSummary, FileSymbols, Indented, SymbolRefsLabel,
+    indented_symbol, write_markdown_heading_tree, write_test_tree, FileContent, FileSummary,
+    FileSummaryKind, FileSymbols, Indented, MarkdownDocument, SymbolRefsLabel,
 };
 use crate::{parser, util};
 
@@ -14,7 +15,7 @@ pub struct FileDigest {
     pub language_kind: LanguageKind,
     pub ext: String,
     pub total_lines: usize,
-    pub symbols: FileSymbols,
+    pub content: FileContent,
 }
 
 impl FileDigest {
@@ -27,9 +28,7 @@ impl FileDigest {
             .to_string();
 
         let parsed = parser::parse_file(path)?;
-        let symbols = parsed
-            .language_kind
-            .extract_symbols(parsed.tree.root_node(), parsed.source.as_bytes());
+        let content = parsed.extract_content();
         let total_lines = parsed.source.lines().count();
         let display_path = util::relative_path(path);
 
@@ -38,25 +37,37 @@ impl FileDigest {
             language_kind: parsed.language_kind,
             ext,
             total_lines,
-            symbols,
+            content,
         })
     }
 
     /// Compress into a compact summary for follow-mode children.
     pub fn summarize(&self) -> FileSummary {
-        let export_names = self
-            .symbols
-            .exports
-            .iter()
-            .map(|s| extract_name_from_signature(&s.signature))
-            .collect();
-        let type_names = self.symbols.types.iter().map(|t| t.name.clone()).collect();
         FileSummary {
             display_path: self.display_path.clone(),
             total_lines: self.total_lines,
-            export_names,
-            type_names,
+            kind: match &self.content {
+                FileContent::Code(symbols) => FileSummaryKind::Code {
+                    export_names: symbols
+                        .exports
+                        .iter()
+                        .map(|s| extract_name_from_signature(&s.signature))
+                        .collect(),
+                    type_names: symbols.types.iter().map(|t| t.name.clone()).collect(),
+                },
+                FileContent::Markdown(document) => FileSummaryKind::Markdown {
+                    heading_titles: summary_heading_titles(document),
+                },
+            },
         }
+    }
+
+    pub fn dependency_specifiers(&self) -> Vec<String> {
+        self.language_kind.collect_dependency_specifiers(&self.content)
+    }
+
+    pub fn code_symbols(&self) -> Option<&FileSymbols> {
+        self.content.as_code()
     }
 }
 
@@ -92,11 +103,23 @@ pub(crate) fn extract_name_from_signature(sig: &str) -> String {
 impl fmt::Display for FileSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}  ({} lines)", self.display_path, self.total_lines)?;
-        if !self.export_names.is_empty() {
-            write!(f, "\n    exports: {}", self.export_names.join(", "))?;
-        }
-        if !self.type_names.is_empty() {
-            write!(f, "\n    types: {}", self.type_names.join(", "))?;
+        match &self.kind {
+            FileSummaryKind::Code {
+                export_names,
+                type_names,
+            } => {
+                if !export_names.is_empty() {
+                    write!(f, "\n    exports: {}", export_names.join(", "))?;
+                }
+                if !type_names.is_empty() {
+                    write!(f, "\n    types: {}", type_names.join(", "))?;
+                }
+            }
+            FileSummaryKind::Markdown { heading_titles } => {
+                if !heading_titles.is_empty() {
+                    write!(f, "\n    headings: {}", heading_titles.join(", "))?;
+                }
+            }
         }
         Ok(())
     }
@@ -104,11 +127,6 @@ impl fmt::Display for FileSummary {
 
 impl fmt::Display for FileDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let symbol_refs_label = match self.language_kind.symbol_ref_label() {
-            "refs" => SymbolRefsLabel::Refs,
-            _ => SymbolRefsLabel::Calls,
-        };
-
         writeln!(
             f,
             "{}  ({}, {} lines)",
@@ -116,63 +134,142 @@ impl fmt::Display for FileDigest {
         )?;
         writeln!(f)?;
 
-        if !self.symbols.imports.is_empty() {
-            writeln!(f, "imports: {}", self.symbols.imports.join(", "))?;
-            writeln!(f)?;
-        }
-
-        if !self.symbols.reexports.is_empty() {
-            write_reexports(f, &self.symbols.reexports)?;
-            writeln!(f)?;
-        }
-
-        if !self.symbols.exports.is_empty() {
-            writeln!(f, "exports:")?;
-            for sym in &self.symbols.exports {
-                writeln!(f, "{}", indented_symbol("  ", sym, symbol_refs_label))?;
-            }
-            if has_more_sections(&self.symbols, SectionAfter::Exports) {
-                writeln!(f)?;
-            }
-        }
-
-        if !self.symbols.internals.is_empty() {
-            writeln!(f, "internal:")?;
-            for sym in &self.symbols.internals {
-                writeln!(f, "{}", indented_symbol("  ", sym, symbol_refs_label))?;
-            }
-            if has_more_sections(&self.symbols, SectionAfter::Internals) {
-                writeln!(f)?;
-            }
-        }
-
-        if !self.symbols.hooks.is_empty() {
-            writeln!(f, "hooks:")?;
-            for h in &self.symbols.hooks {
-                writeln!(f, "{}", Indented("  ", h))?;
-            }
-            if has_more_sections(&self.symbols, SectionAfter::Hooks) {
-                writeln!(f)?;
-            }
-        }
-
-        if !self.symbols.types.is_empty() {
-            writeln!(f, "types:")?;
-            for t in &self.symbols.types {
-                writeln!(f, "{}", Indented("  ", t))?;
-            }
-            if !self.symbols.tests.is_empty() {
-                writeln!(f)?;
-            }
-        }
-
-        if !self.symbols.tests.is_empty() {
-            writeln!(f, "tests:")?;
-            write_test_tree(f, &self.symbols.tests, "  ")?;
+        match &self.content {
+            FileContent::Code(symbols) => write_code_digest(f, self.language_kind, symbols)?,
+            FileContent::Markdown(document) => write_markdown_digest(f, document)?,
         }
 
         Ok(())
     }
+}
+
+fn summary_heading_titles(document: &MarkdownDocument) -> Vec<String> {
+    let top_level: Vec<String> = document
+        .headings
+        .iter()
+        .filter(|heading| heading.depth == 1)
+        .map(|heading| heading.title.clone())
+        .collect();
+    if !top_level.is_empty() {
+        return top_level;
+    }
+
+    document
+        .headings
+        .iter()
+        .take(3)
+        .map(|heading| heading.title.clone())
+        .collect()
+}
+
+fn write_code_digest(
+    f: &mut fmt::Formatter<'_>,
+    language_kind: LanguageKind,
+    symbols: &FileSymbols,
+) -> fmt::Result {
+    let symbol_refs_label = match language_kind.symbol_ref_label() {
+        "refs" => SymbolRefsLabel::Refs,
+        _ => SymbolRefsLabel::Calls,
+    };
+
+    if !symbols.imports.is_empty() {
+        writeln!(f, "imports: {}", symbols.imports.join(", "))?;
+        writeln!(f)?;
+    }
+
+    if !symbols.reexports.is_empty() {
+        write_reexports(f, &symbols.reexports)?;
+        writeln!(f)?;
+    }
+
+    if !symbols.exports.is_empty() {
+        writeln!(f, "exports:")?;
+        for sym in &symbols.exports {
+            writeln!(f, "{}", indented_symbol("  ", sym, symbol_refs_label))?;
+        }
+        if has_more_sections(symbols, SectionAfter::Exports) {
+            writeln!(f)?;
+        }
+    }
+
+    if !symbols.internals.is_empty() {
+        writeln!(f, "internal:")?;
+        for sym in &symbols.internals {
+            writeln!(f, "{}", indented_symbol("  ", sym, symbol_refs_label))?;
+        }
+        if has_more_sections(symbols, SectionAfter::Internals) {
+            writeln!(f)?;
+        }
+    }
+
+    if !symbols.hooks.is_empty() {
+        writeln!(f, "hooks:")?;
+        for h in &symbols.hooks {
+            writeln!(f, "{}", Indented("  ", h))?;
+        }
+        if has_more_sections(symbols, SectionAfter::Hooks) {
+            writeln!(f)?;
+        }
+    }
+
+    if !symbols.types.is_empty() {
+        writeln!(f, "types:")?;
+        for t in &symbols.types {
+            writeln!(f, "{}", Indented("  ", t))?;
+        }
+        if !symbols.tests.is_empty() {
+            writeln!(f)?;
+        }
+    }
+
+    if !symbols.tests.is_empty() {
+        writeln!(f, "tests:")?;
+        write_test_tree(f, &symbols.tests, "  ")?;
+    }
+
+    Ok(())
+}
+
+fn write_markdown_digest(f: &mut fmt::Formatter<'_>, document: &MarkdownDocument) -> fmt::Result {
+    let mut printed_section = false;
+
+    if let Some(frontmatter) = &document.frontmatter {
+        writeln!(f, "frontmatter:")?;
+        writeln!(f, "{}", Indented("  ", frontmatter))?;
+        printed_section = true;
+    }
+
+    if !document.headings.is_empty() {
+        if printed_section {
+            writeln!(f)?;
+        }
+        writeln!(f, "headings:")?;
+        write_markdown_heading_tree(f, &document.headings, "  ")?;
+        printed_section = true;
+    }
+
+    if !document.links.is_empty() {
+        if printed_section {
+            writeln!(f)?;
+        }
+        writeln!(f, "links:")?;
+        for link in &document.links {
+            writeln!(f, "{}", Indented("  ", link))?;
+        }
+        printed_section = true;
+    }
+
+    if !document.code_blocks.is_empty() {
+        if printed_section {
+            writeln!(f)?;
+        }
+        writeln!(f, "code fences:")?;
+        for block in &document.code_blocks {
+            writeln!(f, "{}", Indented("  ", block))?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Tracks which section we just printed to decide if a blank separator is needed.
@@ -245,7 +342,7 @@ fn write_reexports(
 mod tests {
     use super::*;
     use crate::lang::LanguageKind;
-    use crate::model::{FileSummary, Symbol};
+    use crate::model::{FileContent, FileSummary, FileSummaryKind, Symbol};
 
     fn empty_symbols() -> FileSymbols {
         FileSymbols {
@@ -337,8 +434,10 @@ mod tests {
         let summary = FileSummary {
             display_path: "src/hooks/use-chat.ts".to_string(),
             total_lines: 360,
-            export_names: vec!["useChat".to_string()],
-            type_names: vec!["ChatMessage".to_string(), "ChatOptions".to_string()],
+            kind: FileSummaryKind::Code {
+                export_names: vec!["useChat".to_string()],
+                type_names: vec!["ChatMessage".to_string(), "ChatOptions".to_string()],
+            },
         };
         let output = format!("{summary}");
         assert!(output.contains("src/hooks/use-chat.ts  (360 lines)"));
@@ -351,8 +450,10 @@ mod tests {
         let summary = FileSummary {
             display_path: "src/empty.ts".to_string(),
             total_lines: 5,
-            export_names: vec![],
-            type_names: vec![],
+            kind: FileSummaryKind::Code {
+                export_names: vec![],
+                type_names: vec![],
+            },
         };
         let output = format!("{summary}");
         assert_eq!(output, "src/empty.ts  (5 lines)");
@@ -371,7 +472,7 @@ mod tests {
             language_kind: LanguageKind::Ts,
             ext: "ts".to_string(),
             total_lines: 2,
-            symbols,
+            content: FileContent::Code(symbols),
         };
 
         let rendered = format!("{digest}");
@@ -391,11 +492,26 @@ mod tests {
             language_kind: LanguageKind::Sql,
             ext: "sql".to_string(),
             total_lines: 1,
-            symbols,
+            content: FileContent::Code(symbols),
         };
 
         let rendered = format!("{digest}");
         assert!(rendered.contains("refs: count"));
         assert!(!rendered.contains("calls: count"));
+    }
+
+    #[test]
+    fn markdown_summary_display_uses_headings() {
+        let summary = FileSummary {
+            display_path: "README.md".to_string(),
+            total_lines: 20,
+            kind: FileSummaryKind::Markdown {
+                heading_titles: vec!["xray".to_string(), "Usage".to_string()],
+            },
+        };
+
+        let output = format!("{summary}");
+        assert!(output.contains("README.md  (20 lines)"));
+        assert!(output.contains("headings: xray, Usage"));
     }
 }

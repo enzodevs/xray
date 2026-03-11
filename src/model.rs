@@ -242,15 +242,143 @@ impl fmt::Display for Indented<'_, Hook> {
     }
 }
 
+/// A heading in a Markdown document.
+pub struct MarkdownHeading {
+    pub title: String,
+    pub depth: u8,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub children: Vec<MarkdownHeading>,
+}
+
+impl fmt::Display for Indented<'_, MarkdownHeading> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Indented(indent, heading) = self;
+        write!(
+            f,
+            "{}H{} {}  [L{}-{}]",
+            indent, heading.depth, heading.title, heading.line_start, heading.line_end
+        )
+    }
+}
+
+/// Write a Markdown heading tree with recursive indentation.
+pub fn write_markdown_heading_tree(
+    f: &mut fmt::Formatter<'_>,
+    headings: &[MarkdownHeading],
+    indent: &str,
+) -> fmt::Result {
+    for heading in headings {
+        writeln!(f, "{}", Indented(indent, heading))?;
+        if !heading.children.is_empty() {
+            let deeper = format!("{indent}  ");
+            write_markdown_heading_tree(f, &heading.children, &deeper)?;
+        }
+    }
+    Ok(())
+}
+
+/// A link-like reference extracted from a Markdown document.
+pub struct MarkdownLink {
+    pub label: String,
+    pub target: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub is_local: bool,
+    pub is_image: bool,
+}
+
+impl fmt::Display for Indented<'_, MarkdownLink> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Indented(indent, link) = self;
+        let scope = if link.is_local { "local" } else { "external" };
+        let kind = if link.is_image { "image" } else { "link" };
+        if link.label.is_empty() || link.label == link.target {
+            write!(
+                f,
+                "{}{} {}: {}  [L{}-{}]",
+                indent, scope, kind, link.target, link.line_start, link.line_end
+            )
+        } else {
+            write!(
+                f,
+                "{}{} {}: {}  {:?}  [L{}-{}]",
+                indent,
+                scope,
+                kind,
+                link.target,
+                link.label,
+                link.line_start,
+                link.line_end
+            )
+        }
+    }
+}
+
+/// A fenced code block extracted from a Markdown document.
+pub struct MarkdownCodeBlock {
+    pub language: Option<String>,
+    pub line_start: usize,
+    pub line_end: usize,
+}
+
+impl fmt::Display for Indented<'_, MarkdownCodeBlock> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Indented(indent, block) = self;
+        let lang = block.language.as_deref().unwrap_or("text");
+        write!(
+            f,
+            "{}{}  [L{}-{}]",
+            indent, lang, block.line_start, block.line_end
+        )
+    }
+}
+
+/// Frontmatter block extracted from a Markdown document.
+pub struct MarkdownFrontmatter {
+    pub kind: String,
+    pub line_start: usize,
+    pub line_end: usize,
+}
+
+impl fmt::Display for Indented<'_, MarkdownFrontmatter> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Indented(indent, frontmatter) = self;
+        write!(
+            f,
+            "{}{}  [L{}-{}]",
+            indent, frontmatter.kind, frontmatter.line_start, frontmatter.line_end
+        )
+    }
+}
+
+/// Structured digest data for a Markdown document.
+pub struct MarkdownDocument {
+    pub frontmatter: Option<MarkdownFrontmatter>,
+    pub headings: Vec<MarkdownHeading>,
+    pub links: Vec<MarkdownLink>,
+    pub code_blocks: Vec<MarkdownCodeBlock>,
+}
+
 /// Compact representation of a file for follow-mode child nodes.
 pub struct FileSummary {
     pub display_path: String,
     pub total_lines: usize,
-    pub export_names: Vec<String>,
-    pub type_names: Vec<String>,
+    pub kind: FileSummaryKind,
 }
 
-/// All symbols extracted from a single file.
+/// Compact summary content varies by file kind.
+pub enum FileSummaryKind {
+    Code {
+        export_names: Vec<String>,
+        type_names: Vec<String>,
+    },
+    Markdown {
+        heading_titles: Vec<String>,
+    },
+}
+
+/// All code symbols extracted from a single file.
 pub struct FileSymbols {
     pub imports: Vec<String>,
     pub import_bindings: Vec<ImportBinding>,
@@ -260,4 +388,19 @@ pub struct FileSymbols {
     pub types: Vec<TypeDef>,
     pub tests: Vec<TestBlock>,
     pub hooks: Vec<Hook>,
+}
+
+/// Structured content extracted from a supported file.
+pub enum FileContent {
+    Code(FileSymbols),
+    Markdown(MarkdownDocument),
+}
+
+impl FileContent {
+    pub fn as_code(&self) -> Option<&FileSymbols> {
+        match self {
+            Self::Code(symbols) => Some(symbols),
+            Self::Markdown(_) => None,
+        }
+    }
 }
