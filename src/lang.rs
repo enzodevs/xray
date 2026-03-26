@@ -16,6 +16,7 @@ pub enum LanguageKind {
     Ts,
     Sql,
     Py,
+    Rs,
     Md,
 }
 
@@ -36,6 +37,9 @@ impl LanguageKind {
         if is_python_extension(ext) {
             return Some(Self::Py);
         }
+        if is_rust_extension(ext) {
+            return Some(Self::Rs);
+        }
         if is_markdown_extension(ext) {
             return Some(Self::Md);
         }
@@ -48,6 +52,7 @@ impl LanguageKind {
             Self::Sql => Ok(tree_sitter_sequel::LANGUAGE.into()),
             Self::Ts => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             Self::Py => Ok(tree_sitter_python::LANGUAGE.into()),
+            Self::Rs => Ok(tree_sitter_rust::LANGUAGE.into()),
             Self::Md => Err(XrayError::UnsupportedFeature {
                 feature: "tree-sitter parser",
                 language: "Markdown",
@@ -59,7 +64,7 @@ impl LanguageKind {
     pub fn tree_sitter_language_for_extension(self, ext: &str) -> Result<TsLanguage, XrayError> {
         match self {
             Self::Ts if matches_tsx_extension(ext) => Ok(tree_sitter_typescript::LANGUAGE_TSX.into()),
-            Self::Sql | Self::Ts | Self::Py | Self::Md => self.tree_sitter_language(),
+            Self::Sql | Self::Ts | Self::Py | Self::Rs | Self::Md => self.tree_sitter_language(),
         }
     }
 
@@ -69,6 +74,7 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_symbols(root, src),
             Self::Sql => extract::extract_sql_symbols(root, src),
             Self::Py => extract::extract_py_symbols(root, src),
+            Self::Rs => extract::extract_rs_symbols(root, src),
             Self::Md => FileSymbols {
                 imports: Vec::new(),
                 import_bindings: Vec::new(),
@@ -88,6 +94,7 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_sources_only(root, src),
             Self::Sql => extract::extract_sql_sources_only(src),
             Self::Py => extract::extract_py_sources_only(root, src),
+            Self::Rs => extract::extract_rs_sources_only(root, src),
             Self::Md => Vec::new(),
         }
     }
@@ -99,7 +106,9 @@ impl LanguageKind {
                 resolve::collect_sources(&symbols.imports, &symbols.reexports)
             }
             // SQL includes are stored in `imports`; SQL has no re-export concept.
-            (Self::Sql | Self::Py, FileContent::Code(symbols)) => dedupe_strings(&symbols.imports),
+            (Self::Sql | Self::Py | Self::Rs, FileContent::Code(symbols)) => {
+                dedupe_strings(&symbols.imports)
+            }
             (Self::Md, FileContent::Markdown(document)) => document
                 .links
                 .iter()
@@ -127,6 +136,7 @@ impl LanguageKind {
             Self::Ts => resolve::resolve_import(specifier, from_file, path_config),
             Self::Sql => resolve::resolve_sql_include(specifier, from_file),
             Self::Py => resolve::resolve_py_import(specifier, from_file),
+            Self::Rs => resolve::resolve_rs_import(specifier, from_file),
             Self::Md => resolve::resolve_markdown_link(specifier, from_file),
         }
     }
@@ -134,7 +144,7 @@ impl LanguageKind {
     /// Human-facing label for symbol references in this ecosystem.
     pub fn symbol_ref_label(self) -> &'static str {
         match self {
-            Self::Ts | Self::Py => "calls",
+            Self::Ts | Self::Py | Self::Rs => "calls",
             Self::Sql => "refs",
             Self::Md => "links",
         }
@@ -146,6 +156,7 @@ impl LanguageKind {
             Self::Ts => "TypeScript/JavaScript",
             Self::Sql => "SQL",
             Self::Py => "Python",
+            Self::Rs => "Rust",
             Self::Md => "Markdown",
         }
     }
@@ -186,6 +197,10 @@ fn matches_tsx_extension(ext: &str) -> bool {
 
 fn is_python_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("py")
+}
+
+fn is_rust_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("rs")
 }
 
 fn is_markdown_extension(ext: &str) -> bool {
@@ -253,7 +268,9 @@ mod tests {
         assert_eq!(LanguageKind::for_extension("py"), Some(LanguageKind::Py));
         assert_eq!(LanguageKind::for_extension("PY"), Some(LanguageKind::Py));
         assert_eq!(LanguageKind::for_extension("md"), Some(LanguageKind::Md));
-        assert_eq!(LanguageKind::for_extension("rs"), None);
+        assert_eq!(LanguageKind::for_extension("rs"), Some(LanguageKind::Rs));
+        assert_eq!(LanguageKind::for_extension("RS"), Some(LanguageKind::Rs));
+        assert_eq!(LanguageKind::for_extension("toml"), None);
     }
 
     #[test]
@@ -410,6 +427,7 @@ mod tests {
         assert_eq!(LanguageKind::Ts.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Sql.symbol_ref_label(), "refs");
         assert_eq!(LanguageKind::Py.symbol_ref_label(), "calls");
+        assert_eq!(LanguageKind::Rs.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Md.symbol_ref_label(), "links");
     }
 
@@ -421,6 +439,8 @@ mod tests {
         assert!(!LanguageKind::Sql.supports_lsp());
         assert!(!LanguageKind::Py.supports_trace());
         assert!(!LanguageKind::Py.supports_lsp());
+        assert!(!LanguageKind::Rs.supports_trace());
+        assert!(!LanguageKind::Rs.supports_lsp());
         assert!(!LanguageKind::Md.supports_trace());
         assert!(!LanguageKind::Md.supports_lsp());
     }

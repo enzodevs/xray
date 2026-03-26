@@ -149,6 +149,7 @@ const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "dist",
     "build",
+    "target",
     ".next",
     ".turbo",
     "coverage",

@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TS/JS, Python, SQL, and Markdown files. ~10x compression.
+Structural code and docs digest for TS/JS, Python, Rust, SQL, and Markdown files. ~10x compression.
 
 ## Build & Verify
 
@@ -28,22 +28,24 @@ xray --no-follow <file>          # plain: single file digest only
 | File | Role |
 |------|------|
 | `main.rs` | CLI arg parsing (Mode enum) + dispatch |
-| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Md): central dispatch for extraction, resolution, capabilities |
+| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Rs/Md): central dispatch for extraction, resolution, capabilities |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
 | `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server` integration |
-| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + SQL + Markdown links) |
-| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, `resolve::sql`, and `resolve::markdown` |
+| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + Rust + SQL + Markdown links) |
+| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
 | `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
 | `resolve/py.rs` | Python import resolution: relative (`.`/`..`) + local project modules/packages |
+| `resolve/rs.rs` | Rust module resolution: `mod`, `crate::`, `super::`, `self::` paths |
 | `resolve/sql.rs` | SQL include resolution: `resolve_sql_include` (bare + relative paths) |
 | `resolve/markdown.rs` | Markdown link resolution: local relative links + fragment stripping |
 | `resolve/shared.rs` | Shared `try_extensions_with()` utility |
 | `output.rs` | `FileDigest::from_path`, `summarize()`, `FileSummary`, Display impls |
 | `model.rs` | Symbol, JsxNode, TypeDef, Hook, MarkdownDocument, FileSummary, FileContent, FileSymbols, SymbolRefsLabel |
-| `extract/mod.rs` | Backend entrypoints: TS/Python/SQL/Markdown extraction + integration tests |
+| `extract/mod.rs` | Backend entrypoints: TS/Python/Rust/SQL/Markdown extraction + integration tests |
 | `extract/markdown.rs` | Markdown extraction (headings, links, frontmatter, fenced code blocks) |
 | `extract/python.rs` | Python extraction (imports, public/internal funcs, classes/dataclasses, calls, `__all__`) |
+| `extract/rust.rs` | Rust extraction (use/mod, pub/private fns, structs/enums/traits/impls, derives, tests, calls) |
 | `extract/sql.rs` | SQL statement extraction (SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE) + include directives |
 | `extract/jsx.rs` | JSX detection + hierarchy tree (`returns_jsx`, `extract_jsx_components`) |
 | `extract/hooks.rs` | React hooks extraction |
@@ -60,7 +62,7 @@ xray --no-follow <file>          # plain: single file digest only
 - **Rust practices**: See [docs/rust-practices.md](docs/rust-practices.md) — MANDATORY
 - **Lints**: `clippy::all = deny`, `clippy::pedantic = warn` (see Cargo.toml)
 - **Errors**: `thiserror` only. No `unwrap()`/`expect()` outside tests
-- **Tests**: Descriptive names, one behavior per test. Use `parse_ts()` / `parse_tsx()` helpers
+- **Tests**: Descriptive names, one behavior per test. Use `parse_ts()` / `parse_tsx()` / `parse_rs()` helpers
 - **tree-sitter v0.23 gotchas**:
   - Enum members are `property_identifier`, not `enum_member`
   - JSX tag name: `child_by_field_name("name")`, NOT `child(0)`
@@ -68,6 +70,12 @@ xray --no-follow <file>          # plain: single file digest only
   - `namespace` → wrapped in `expression_statement` > `internal_module`
   - `declare module` → wrapped in `ambient_declaration` > `module`
   - Decorators: accessed via `children_by_field_name("decorator")`; `named_child(0)` gives the expression after `@`
+- **tree-sitter-rust v0.23 gotchas**:
+  - Attributes (`#[...]`) are sibling `attribute_item` nodes, not children of the decorated item
+  - `visibility_modifier` is a child node (first named child), not a keyword token
+  - `impl Trait for Type` has two `type_identifier` children: trait first, type second
+  - `macro_definition` has `name` field; macro calls are `macro_invocation` (separate node kind)
+  - `function_signature_item` for trait method signatures without body (vs `function_item` with body)
 
 ## Smoke Testing
 

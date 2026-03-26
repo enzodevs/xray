@@ -4,6 +4,7 @@ mod hooks;
 mod jsx;
 mod markdown;
 mod python;
+mod rust;
 mod sql;
 mod tests_block;
 mod types;
@@ -49,6 +50,16 @@ pub(crate) fn extract_sql_sources_only(src: &[u8]) -> Vec<String> {
 /// Python ecosystem dependency extractor entrypoint (import statements only).
 pub(crate) fn extract_py_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     python::extract_sources_only(root, src)
+}
+
+/// Rust ecosystem extractor entrypoint (explicit backend boundary).
+pub(crate) fn extract_rs_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    rust::extract_symbols(root, src)
+}
+
+/// Rust ecosystem dependency extractor entrypoint (use/mod declarations only).
+pub(crate) fn extract_rs_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    rust::extract_sources_only(root, src)
 }
 
 /// Markdown dependency extractor entrypoint (local links only).

@@ -39,7 +39,7 @@ pub fn parse_file(path: &Path) -> Result<ParsedFile, XrayError> {
             markdown::to_mdast(&source, &markdown_parse_options())
                 .map_err(|e| XrayError::ParseFailed(e.to_string()))?,
         ),
-        LanguageKind::Ts | LanguageKind::Sql | LanguageKind::Py => {
+        LanguageKind::Ts | LanguageKind::Sql | LanguageKind::Py | LanguageKind::Rs => {
             let language = detect_language(ext)?;
             let mut parser = Parser::new();
             parser

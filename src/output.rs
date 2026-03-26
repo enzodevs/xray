@@ -92,7 +92,10 @@ pub(crate) fn extract_name_from_signature(sig: &str) -> String {
         .trim_start_matches("def ")
         .trim_start_matches("const ")
         .trim_start_matches("function ")
-        .trim_start_matches("class ");
+        .trim_start_matches("class ")
+        .trim_start_matches("fn ")
+        .trim_start_matches("unsafe ")
+        .trim_start_matches("fn ");
     s.split(['(', '=', '<', ' '])
         .next()
         .unwrap_or("?")
