@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use crate::error::XrayError;
+use crate::lang::LanguageKind;
 
-/// Minimal LSP client that communicates with `typescript-language-server` via stdio.
+/// Minimal LSP client that communicates with a language server via stdio.
 pub struct LspClient {
     child: Child,
     stdin: BufWriter<std::process::ChildStdin>,
@@ -16,14 +17,15 @@ pub struct LspClient {
 
 impl LspClient {
     /// Spawn the language server and perform the initialize handshake.
-    pub fn start(root: &Path) -> Result<Self, XrayError> {
-        let mut child = Command::new("typescript-language-server")
-            .arg("--stdio")
+    pub fn start(root: &Path, language_kind: LanguageKind) -> Result<Self, XrayError> {
+        let (program, args) = server_command(language_kind);
+        let mut child = Command::new(program)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| XrayError::Lsp(format!("spawn failed: {e}")))?;
+            .map_err(|e| XrayError::Lsp(format!("{program} spawn failed: {e}")))?;
 
         let stdin = BufWriter::new(
             child
@@ -251,12 +253,24 @@ impl Drop for LspClient {
     }
 }
 
+fn server_command(language_kind: LanguageKind) -> (&'static str, &'static [&'static str]) {
+    match language_kind {
+        LanguageKind::Svelte => ("svelte-language-server", &["--stdio"]),
+        LanguageKind::Ts
+        | LanguageKind::Sql
+        | LanguageKind::Py
+        | LanguageKind::Rs
+        | LanguageKind::Md => ("typescript-language-server", &["--stdio"]),
+    }
+}
+
 /// Map file extension to LSP `languageId`.
 fn language_id(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ts" | "mts") => "typescript",
         Some("tsx") => "typescriptreact",
         Some("jsx") => "javascriptreact",
+        Some("svelte") => "svelte",
         _ => "javascript",
     }
 }
@@ -302,6 +316,19 @@ mod tests {
         assert_eq!(language_id(Path::new("a.js")), "javascript");
         assert_eq!(language_id(Path::new("a.mjs")), "javascript");
         assert_eq!(language_id(Path::new("a.cjs")), "javascript");
+        assert_eq!(language_id(Path::new("a.svelte")), "svelte");
+    }
+
+    #[test]
+    fn server_command_uses_svelte_language_server_for_svelte() {
+        assert_eq!(
+            server_command(LanguageKind::Svelte),
+            ("svelte-language-server", &["--stdio"][..])
+        );
+        assert_eq!(
+            server_command(LanguageKind::Ts),
+            ("typescript-language-server", &["--stdio"][..])
+        );
     }
 
     #[test]

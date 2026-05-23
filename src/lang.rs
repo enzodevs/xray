@@ -17,6 +17,7 @@ pub enum LanguageKind {
     Sql,
     Py,
     Rs,
+    Svelte,
     Md,
 }
 
@@ -40,6 +41,9 @@ impl LanguageKind {
         if is_rust_extension(ext) {
             return Some(Self::Rs);
         }
+        if is_svelte_extension(ext) {
+            return Some(Self::Svelte);
+        }
         if is_markdown_extension(ext) {
             return Some(Self::Md);
         }
@@ -53,6 +57,7 @@ impl LanguageKind {
             Self::Ts => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             Self::Py => Ok(tree_sitter_python::LANGUAGE.into()),
             Self::Rs => Ok(tree_sitter_rust::LANGUAGE.into()),
+            Self::Svelte => Ok(tree_sitter_svelte_ng::LANGUAGE.into()),
             Self::Md => Err(XrayError::UnsupportedFeature {
                 feature: "tree-sitter parser",
                 language: "Markdown",
@@ -63,8 +68,12 @@ impl LanguageKind {
     /// tree-sitter parser language for JSX-capable files in the TS ecosystem.
     pub fn tree_sitter_language_for_extension(self, ext: &str) -> Result<TsLanguage, XrayError> {
         match self {
-            Self::Ts if matches_tsx_extension(ext) => Ok(tree_sitter_typescript::LANGUAGE_TSX.into()),
-            Self::Sql | Self::Ts | Self::Py | Self::Rs | Self::Md => self.tree_sitter_language(),
+            Self::Ts if matches_tsx_extension(ext) => {
+                Ok(tree_sitter_typescript::LANGUAGE_TSX.into())
+            }
+            Self::Sql | Self::Ts | Self::Py | Self::Rs | Self::Svelte | Self::Md => {
+                self.tree_sitter_language()
+            }
         }
     }
 
@@ -75,6 +84,7 @@ impl LanguageKind {
             Self::Sql => extract::extract_sql_symbols(root, src),
             Self::Py => extract::extract_py_symbols(root, src),
             Self::Rs => extract::extract_rs_symbols(root, src),
+            Self::Svelte => extract::extract_svelte_symbols(root, src),
             Self::Md => FileSymbols {
                 imports: Vec::new(),
                 import_bindings: Vec::new(),
@@ -95,6 +105,7 @@ impl LanguageKind {
             Self::Sql => extract::extract_sql_sources_only(src),
             Self::Py => extract::extract_py_sources_only(root, src),
             Self::Rs => extract::extract_rs_sources_only(root, src),
+            Self::Svelte => extract::extract_svelte_sources_only(root, src),
             Self::Md => Vec::new(),
         }
     }
@@ -102,7 +113,7 @@ impl LanguageKind {
     /// Collect dependency specifiers from an already-extracted symbol table.
     pub fn collect_dependency_specifiers(self, content: &FileContent) -> Vec<String> {
         match (self, content) {
-            (Self::Ts, FileContent::Code(symbols)) => {
+            (Self::Ts | Self::Svelte, FileContent::Code(symbols)) => {
                 resolve::collect_sources(&symbols.imports, &symbols.reexports)
             }
             // SQL includes are stored in `imports`; SQL has no re-export concept.
@@ -133,7 +144,7 @@ impl LanguageKind {
         path_config: Option<&resolve::PathConfig>,
     ) -> Option<PathBuf> {
         match self {
-            Self::Ts => resolve::resolve_import(specifier, from_file, path_config),
+            Self::Ts | Self::Svelte => resolve::resolve_import(specifier, from_file, path_config),
             Self::Sql => resolve::resolve_sql_include(specifier, from_file),
             Self::Py => resolve::resolve_py_import(specifier, from_file),
             Self::Rs => resolve::resolve_rs_import(specifier, from_file),
@@ -144,7 +155,7 @@ impl LanguageKind {
     /// Human-facing label for symbol references in this ecosystem.
     pub fn symbol_ref_label(self) -> &'static str {
         match self {
-            Self::Ts | Self::Py | Self::Rs => "calls",
+            Self::Ts | Self::Py | Self::Rs | Self::Svelte => "calls",
             Self::Sql => "refs",
             Self::Md => "links",
         }
@@ -157,18 +168,19 @@ impl LanguageKind {
             Self::Sql => "SQL",
             Self::Py => "Python",
             Self::Rs => "Rust",
+            Self::Svelte => "Svelte",
             Self::Md => "Markdown",
         }
     }
 
     /// Whether this ecosystem currently supports trace mode.
     pub fn supports_trace(self) -> bool {
-        matches!(self, Self::Ts)
+        matches!(self, Self::Ts | Self::Svelte)
     }
 
     /// Whether this ecosystem currently supports LSP-assisted trace resolution.
     pub fn supports_lsp(self) -> bool {
-        matches!(self, Self::Ts)
+        matches!(self, Self::Ts | Self::Svelte)
     }
 }
 
@@ -201,6 +213,10 @@ fn is_python_extension(ext: &str) -> bool {
 
 fn is_rust_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("rs")
+}
+
+fn is_svelte_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("svelte")
 }
 
 fn is_markdown_extension(ext: &str) -> bool {
@@ -270,6 +286,14 @@ mod tests {
         assert_eq!(LanguageKind::for_extension("md"), Some(LanguageKind::Md));
         assert_eq!(LanguageKind::for_extension("rs"), Some(LanguageKind::Rs));
         assert_eq!(LanguageKind::for_extension("RS"), Some(LanguageKind::Rs));
+        assert_eq!(
+            LanguageKind::for_extension("svelte"),
+            Some(LanguageKind::Svelte)
+        );
+        assert_eq!(
+            LanguageKind::for_extension("SVELTE"),
+            Some(LanguageKind::Svelte)
+        );
         assert_eq!(LanguageKind::for_extension("toml"), None);
     }
 
@@ -318,6 +342,24 @@ mod tests {
     }
 
     #[test]
+    fn svelte_backend_extracts_script_dependencies_only() {
+        let src = br#"
+            <script>
+              import Child from "./Child.svelte";
+              export { helper } from "./helper";
+            </script>
+            <Child />
+        "#;
+        let tree = parse_with(LanguageKind::Svelte, "svelte", src);
+        let deps =
+            LanguageKind::Svelte.extract_dependency_specifiers_from_ast(tree.root_node(), src);
+        assert_eq!(
+            deps,
+            vec!["./Child.svelte".to_string(), "./helper".to_string()]
+        );
+    }
+
+    #[test]
     fn ts_and_sql_collect_dependency_specifiers_use_isolated_rules() {
         let mut symbols = empty_symbols();
         symbols.imports = vec!["./one".to_string(), "./one".to_string()];
@@ -329,10 +371,15 @@ mod tests {
 
         let content = FileContent::Code(symbols);
         let ts_sources = LanguageKind::Ts.collect_dependency_specifiers(&content);
+        let svelte_sources = LanguageKind::Svelte.collect_dependency_specifiers(&content);
         let sql_sources = LanguageKind::Sql.collect_dependency_specifiers(&content);
         let py_sources = LanguageKind::Py.collect_dependency_specifiers(&content);
 
         assert_eq!(ts_sources, vec!["./one".to_string(), "./two".to_string()]);
+        assert_eq!(
+            svelte_sources,
+            vec!["./one".to_string(), "./two".to_string()]
+        );
         assert_eq!(sql_sources, vec!["./one".to_string()]);
         assert_eq!(py_sources, vec!["./one".to_string()]);
     }
@@ -428,6 +475,7 @@ mod tests {
         assert_eq!(LanguageKind::Sql.symbol_ref_label(), "refs");
         assert_eq!(LanguageKind::Py.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Rs.symbol_ref_label(), "calls");
+        assert_eq!(LanguageKind::Svelte.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Md.symbol_ref_label(), "links");
     }
 
@@ -441,6 +489,8 @@ mod tests {
         assert!(!LanguageKind::Py.supports_lsp());
         assert!(!LanguageKind::Rs.supports_trace());
         assert!(!LanguageKind::Rs.supports_lsp());
+        assert!(LanguageKind::Svelte.supports_trace());
+        assert!(LanguageKind::Svelte.supports_lsp());
         assert!(!LanguageKind::Md.supports_trace());
         assert!(!LanguageKind::Md.supports_lsp());
     }

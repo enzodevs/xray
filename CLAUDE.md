@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TS/JS, Python, Rust, SQL, and Markdown files. ~10x compression.
+Structural code and docs digest for TS/JS, Svelte, Python, Rust, SQL, and Markdown files. ~10x compression.
 
 ## Build & Verify
 
@@ -28,7 +28,7 @@ xray --no-follow <file>          # plain: single file digest only
 | File | Role |
 |------|------|
 | `main.rs` | CLI arg parsing (Mode enum) + dispatch |
-| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Rs/Md): central dispatch for extraction, resolution, capabilities |
+| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Rs/Svelte/Md): central dispatch for extraction, resolution, capabilities |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
 | `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server` integration |
@@ -46,6 +46,7 @@ xray --no-follow <file>          # plain: single file digest only
 | `extract/markdown.rs` | Markdown extraction (headings, links, frontmatter, fenced code blocks) |
 | `extract/python.rs` | Python extraction (imports, public/internal funcs, classes/dataclasses, calls, `__all__`) |
 | `extract/rust.rs` | Rust extraction (use/mod, pub/private fns, structs/enums/traits/impls, derives, tests, calls) |
+| `extract/svelte.rs` | Svelte extraction (template components + `<script>` imports/exports/types/calls via TS backend) |
 | `extract/sql.rs` | SQL statement extraction (SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE) + include directives |
 | `extract/jsx.rs` | JSX detection + hierarchy tree (`returns_jsx`, `extract_jsx_components`) |
 | `extract/hooks.rs` | React hooks extraction |

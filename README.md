@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TypeScript/JavaScript, Python, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
+Structural code and docs digest for TypeScript/JavaScript, Svelte, Python, Rust, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
 
 Built for LLM context windows — feed xray output instead of raw source to save tokens while preserving structural understanding.
 
@@ -95,6 +95,31 @@ types:
   export type Handler (req: Request, res: Response) => Promise<void>  [L10-10]
 ```
 
+### Svelte
+
+```sh
+$ xray routes/UserCard.svelte
+```
+
+```
+routes/UserCard.svelte  (svelte, 42 lines)
+
+imports: ./Avatar.svelte, ./format
+
+exports:
+  [component] default component  [L1-42]
+    calls: avatarFor, visible
+    renders: Card > [Avatar, svelte:component]
+  prop user: User  [L5-5]
+
+internal:
+  const label = formatName(user.name)  [L8-8]
+    calls: formatName
+
+types:
+  type User {id, name, avatar}  [L3-3]
+```
+
 ### SQL
 
 ```sh
@@ -159,6 +184,18 @@ Each function also shows:
 - **renders** — JSX component tree: `Layout > [Sidebar, Content > List]`
 - **line ranges** — `[L10-25]` for jumping to source
 
+### Svelte
+
+| Section | Content |
+|---------|---------|
+| **imports** | `<script>` module sources, including `.svelte` components |
+| **re-exports** | `<script>` re-exports grouped by source |
+| **exports** | The file's default component plus `export let`/`export const` props |
+| **internal** | Script functions/consts extracted through the TS/JS backend |
+| **hooks** | Svelte lifecycle calls and runes such as `onMount`, `$state`, `$derived`, `$effect` |
+| **types** | TypeScript types declared in `<script lang="ts">` |
+| **renders** | Svelte component tree from markup: `Layout > [Header, Slot]` |
+
 ### Python
 
 | Section | Content |
@@ -203,18 +240,20 @@ Notes:
 | **Trace symbol** | `--trace -s NAME` | Traces a single specific exported symbol |
 
 The `--all` flag disables noise filtering in follow and trace modes.
-`--trace` and `--lsp` currently support only TypeScript/JavaScript files. For Markdown, follow and `--who` work on local links; trace is unsupported.
+`--trace` supports TypeScript/JavaScript and Svelte files. `--lsp` uses `typescript-language-server` for TypeScript/JavaScript and `svelte-language-server` for Svelte when installed. For Markdown, follow and `--who` work on local links; trace is unsupported.
 
 ## Supported files
 
-`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.py`, `.sql`, `.md`
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.svelte`, `.py`, `.rs`, `.sql`, `.md`
 
 ## How it works
 
 xray uses [tree-sitter](https://tree-sitter.github.io/) for code files and a dedicated Markdown parser for `.md` files, then walks those parsed structures to extract structural information. No regex, no string matching — just syntax-aware extraction.
 
 - **TypeScript/JavaScript**: `tree-sitter-typescript`
+- **Svelte**: `tree-sitter-svelte-ng` plus `tree-sitter-typescript` for `<script>` blocks
 - **Python**: `tree-sitter-python`
+- **Rust**: `tree-sitter-rust`
 - **SQL**: `tree-sitter-sequel`
 - **Markdown**: `markdown`
 

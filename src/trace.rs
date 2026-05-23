@@ -95,7 +95,7 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
     let mut lsp = if config.use_lsp {
         let fallback_dir = entry.parent().unwrap_or(Path::new("."));
         let root = util::git_root(fallback_dir).unwrap_or_else(|| fallback_dir.to_path_buf());
-        match LspClient::start(&root) {
+        match LspClient::start(&root, digest.language_kind) {
             Ok(mut client) => {
                 // Resolve imported file paths so the LSP can eagerly load
                 // their type graphs (needed for member call resolution).
@@ -726,6 +726,22 @@ mod tests {
     fn validate_trace_capabilities_allows_ts() {
         let cfg = default_trace_config();
         let result = validate_trace_capabilities(LanguageKind::Ts, &cfg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_trace_capabilities_allows_svelte_without_lsp() {
+        let cfg = default_trace_config();
+        let result = validate_trace_capabilities(LanguageKind::Svelte, &cfg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_trace_capabilities_allows_svelte_lsp() {
+        let mut cfg = default_trace_config();
+        cfg.use_lsp = true;
+
+        let result = validate_trace_capabilities(LanguageKind::Svelte, &cfg);
         assert!(result.is_ok());
     }
 

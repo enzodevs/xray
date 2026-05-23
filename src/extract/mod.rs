@@ -6,6 +6,7 @@ mod markdown;
 mod python;
 mod rust;
 mod sql;
+mod svelte;
 mod tests_block;
 mod types;
 
@@ -60,6 +61,16 @@ pub(crate) fn extract_rs_symbols(root: Node, src: &[u8]) -> FileSymbols {
 /// Rust ecosystem dependency extractor entrypoint (use/mod declarations only).
 pub(crate) fn extract_rs_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     rust::extract_sources_only(root, src)
+}
+
+/// Svelte ecosystem extractor entrypoint.
+pub(crate) fn extract_svelte_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    svelte::extract_symbols_from_svelte(root, src)
+}
+
+/// Svelte ecosystem dependency extractor entrypoint (`<script>` imports/re-exports only).
+pub(crate) fn extract_svelte_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    svelte::extract_sources_only_from_svelte(root, src)
 }
 
 /// Markdown dependency extractor entrypoint (local links only).
@@ -138,7 +149,7 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
 fn extract_import(node: Node, src: &[u8], imports: &mut Vec<String>) {
     if let Some(source_node) = node.child_by_field_name("source") {
         let path = trim_quotes(txt(source_node, src));
-        if path.starts_with('.') || path.starts_with("@/") {
+        if is_local_module_specifier(path) {
             imports.push(path.to_string());
         }
     }
@@ -147,13 +158,13 @@ fn extract_import(node: Node, src: &[u8], imports: &mut Vec<String>) {
 /// Extract individual import bindings: which names come from which source.
 ///
 /// Handles named (`{ foo, bar as baz }`), default (`import Foo`), and
-/// skips external packages (only local `./` and `@/` specifiers).
+/// skips external packages (only local/path-alias specifiers).
 fn extract_import_bindings(node: Node, src: &[u8], bindings: &mut Vec<ImportBinding>) {
     let Some(source_node) = node.child_by_field_name("source") else {
         return;
     };
     let source = trim_quotes(txt(source_node, src));
-    if !source.starts_with('.') && !source.starts_with("@/") {
+    if !is_local_module_specifier(source) {
         return;
     }
 
@@ -835,9 +846,7 @@ pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
             "import_statement" => {
                 if let Some(source_node) = node.child_by_field_name("source") {
                     let path = trim_quotes(txt(source_node, src));
-                    if (path.starts_with('.') || path.starts_with("@/"))
-                        && !sources.iter().any(|s| s == path)
-                    {
+                    if is_local_module_specifier(path) && !sources.iter().any(|s| s == path) {
                         sources.push(path.to_string());
                     }
                 }
@@ -845,9 +854,7 @@ pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
             "export_statement" => {
                 if let Some(source_node) = node.child_by_field_name("source") {
                     let path = trim_quotes(txt(source_node, src));
-                    if (path.starts_with('.') || path.starts_with('@'))
-                        && !sources.iter().any(|s| s == path)
-                    {
+                    if is_local_module_specifier(path) && !sources.iter().any(|s| s == path) {
                         sources.push(path.to_string());
                     }
                 }
@@ -857,6 +864,10 @@ pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     }
 
     sources
+}
+
+fn is_local_module_specifier(path: &str) -> bool {
+    path.starts_with('.') || path.starts_with("@/") || path.starts_with("$lib/")
 }
 
 #[cfg(test)]
@@ -905,6 +916,20 @@ mod tests {
         let symbols = extract_symbols(tree.root_node(), src);
 
         assert_eq!(symbols.imports, vec!["./foo"]);
+    }
+
+    #[test]
+    fn extract_symbols_finds_sveltekit_lib_import() {
+        let src = b"import Button from '$lib/components/Button.svelte';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+
+        assert_eq!(symbols.imports, vec!["$lib/components/Button.svelte"]);
+        assert_eq!(symbols.import_bindings.len(), 1);
+        assert_eq!(
+            symbols.import_bindings[0].source,
+            "$lib/components/Button.svelte"
+        );
     }
 
     #[test]
@@ -2056,5 +2081,15 @@ describe('suite', () => {
         let symbols = extract_symbols(tree.root_node(), src);
         assert_eq!(symbols.import_bindings.len(), 1);
         assert_eq!(symbols.import_bindings[0].source, "@/lib/api");
+    }
+
+    #[test]
+    fn import_bindings_sveltekit_lib_alias() {
+        let src = b"import Widget from '$lib/Widget.svelte';";
+        let tree = parse_ts(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.import_bindings.len(), 1);
+        assert_eq!(symbols.import_bindings[0].local_name, "Widget");
+        assert_eq!(symbols.import_bindings[0].source, "$lib/Widget.svelte");
     }
 }

@@ -4,7 +4,7 @@ use crate::model::ReExport;
 
 use super::{shared, PathConfig};
 
-const EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "mjs", "cjs"];
+const EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "mjs", "cjs", "svelte"];
 
 /// Merge import specifiers and re-export sources into a deduplicated list.
 pub(crate) fn collect_sources(imports: &[String], reexports: &[ReExport]) -> Vec<String> {
@@ -15,7 +15,7 @@ pub(crate) fn collect_sources(imports: &[String], reexports: &[ReExport]) -> Vec
         }
     }
     for re in reexports {
-        if !re.source.starts_with('.') && !re.source.starts_with('@') {
+        if !is_local_module_specifier(&re.source) {
             continue;
         }
         if !seen.contains(&re.source) {
@@ -54,6 +54,12 @@ pub(crate) fn resolve_import(
             let rest = &specifier[2..];
             let base = root.join("src").join(rest);
             return try_extensions(&base);
+        }
+    }
+
+    if let Some(rest) = specifier.strip_prefix("$lib/") {
+        if let Some(resolved) = resolve_sveltekit_lib_alias(parent, rest) {
+            return Some(resolved);
         }
     }
 
@@ -104,6 +110,20 @@ pub(crate) fn load_path_config(start_dir: &Path) -> Option<PathConfig> {
 /// then /index.ts, /index.tsx, /index.js, /index.jsx.
 fn try_extensions(base: &Path) -> Option<PathBuf> {
     shared::try_extensions_with(base, EXTENSIONS)
+}
+
+fn resolve_sveltekit_lib_alias(start_dir: &Path, rest: &str) -> Option<PathBuf> {
+    for dir in start_dir.ancestors() {
+        let base = dir.join("src").join("lib").join(rest);
+        if let Some(resolved) = try_extensions(&base) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
+fn is_local_module_specifier(source: &str) -> bool {
+    source.starts_with('.') || source.starts_with('@') || source.starts_with("$lib/")
 }
 
 /// Expand an alias pattern against a specifier.
@@ -276,7 +296,7 @@ mod tests {
     fn try_extensions_finds_extended_ts_ecosystem_files() {
         let dir = tempfile::tempdir().unwrap();
 
-        for ext in ["mts", "mjs", "cjs"] {
+        for ext in ["mts", "mjs", "cjs", "svelte"] {
             let stem = format!("entry_{ext}");
             let file = dir.path().join(format!("{stem}.{ext}"));
             fs::write(&file, "export const x = 1;").unwrap();
@@ -327,6 +347,18 @@ mod tests {
         }];
         let result = collect_sources(&imports, &reexports);
         assert_eq!(result, vec!["./a", "./b", "./c"]);
+    }
+
+    #[test]
+    fn collect_sources_keeps_sveltekit_lib_reexports() {
+        let imports = vec!["$lib/a".to_string()];
+        let reexports = vec![ReExport {
+            names: vec!["X".to_string()],
+            source: "$lib/b".to_string(),
+            is_type: false,
+        }];
+        let result = collect_sources(&imports, &reexports);
+        assert_eq!(result, vec!["$lib/a", "$lib/b"]);
     }
 
     #[test]
@@ -501,6 +533,23 @@ mod tests {
         fs::write(&target, "export {};").unwrap();
 
         let result = resolve_import("./config", &entry, None);
+        assert_eq!(result, Some(target));
+    }
+
+    #[test]
+    fn resolve_import_finds_sveltekit_lib_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let lib = src.join("lib");
+        fs::create_dir_all(lib.join("components")).unwrap();
+        let entry_dir = src.join("routes");
+        fs::create_dir(&entry_dir).unwrap();
+        let entry = entry_dir.join("+page.svelte");
+        fs::write(&entry, "").unwrap();
+        let target = lib.join("components").join("Button.svelte");
+        fs::write(&target, "").unwrap();
+
+        let result = resolve_import("$lib/components/Button", &entry, None);
         assert_eq!(result, Some(target));
     }
 }
