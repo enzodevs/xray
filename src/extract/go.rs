@@ -216,7 +216,7 @@ fn extract_type_spec(node: Node, src: &[u8]) -> Option<TypeDef> {
     Some(TypeDef {
         name: name.to_string(),
         kind: kind.to_string(),
-        extends: type_node.map_or_else(String::new, |node| compact_node_text(node, src)),
+        extends: String::new(),
         summary: type_node.map_or_else(String::new, |node| type_member_summary(node, src)),
         line_start: node.start_position().row + 1,
         line_end: node.end_position().row + 1,
@@ -346,15 +346,6 @@ fn collect_type_member_names(node: Node, src: &[u8], names: &mut Vec<String>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_type_member_names(child, src, names);
-    }
-}
-
-fn compact_node_text(node: Node, src: &[u8]) -> String {
-    let text = txt(node, src).trim();
-    if text.len() > 80 {
-        format!("{}...", collapse_whitespace(&text[..80]))
-    } else {
-        collapse_whitespace(text)
     }
 }
 
@@ -518,10 +509,10 @@ func TestNewStore(t *testing.T) {}
             .expect("Run method export");
         assert_eq!(method.calls, vec!["s.Client.Open".to_string()]);
 
-        assert!(symbols
-            .types
-            .iter()
-            .any(|ty| ty.name == "Store" && ty.kind == "struct" && ty.summary == "{Name}"));
+        assert!(symbols.types.iter().any(|ty| ty.name == "Store"
+            && ty.kind == "struct"
+            && ty.extends.is_empty()
+            && ty.summary == "{Name}"));
         assert!(symbols
             .types
             .iter()

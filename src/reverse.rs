@@ -119,7 +119,7 @@ fn find_importers(
             let Ok(resolved_canonical) = resolved.canonicalize() else {
                 continue;
             };
-            if resolved_canonical == target {
+            if dependency_matches_target(parsed.language_kind, &resolved_canonical, target) {
                 let rel = util::relative_path(file_path);
                 let lines = parsed.source.lines().count();
                 importers.push((rel, lines));
@@ -142,6 +142,17 @@ fn find_importers(
 
     importers.sort_by(|a, b| a.0.cmp(&b.0));
     importers
+}
+
+fn dependency_matches_target(language_kind: LanguageKind, resolved: &Path, target: &Path) -> bool {
+    if resolved == target {
+        return true;
+    }
+
+    language_kind == LanguageKind::Go
+        && is_go_file(resolved)
+        && is_go_file(target)
+        && resolved.parent() == target.parent()
 }
 
 /// Directories to skip when walking the project tree.
@@ -201,6 +212,12 @@ fn resolve_source_specifier(
     path_config: Option<&resolve::PathConfig>,
 ) -> Option<PathBuf> {
     language_kind.resolve_source_specifier(specifier, from_file, path_config)
+}
+
+fn is_go_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("go"))
 }
 
 fn should_skip_dir(name: &str) -> bool {
@@ -303,6 +320,30 @@ mod tests {
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("main.ts"));
         assert_eq!(importers[0].1, 2);
+    }
+
+    #[test]
+    fn find_importers_detects_go_package_import_for_any_file_in_package() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("go.mod"), "module example.com/app\n").unwrap();
+        let pkg = dir.path().join("internal/shell");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("aaa.go"), "package shell\n").unwrap();
+        let target = pkg.join("shell.go");
+        fs::write(&target, "package shell\ntype Options struct{}\n").unwrap();
+        let importer_dir = dir.path().join("internal/tools");
+        fs::create_dir_all(&importer_dir).unwrap();
+        fs::write(
+            importer_dir.join("bash.go"),
+            "package tools\nimport \"example.com/app/internal/shell\"\nvar _ = shell.Options{}\n",
+        )
+        .unwrap();
+
+        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]);
+
+        assert_eq!(importers.len(), 1);
+        assert!(importers[0].0.ends_with("internal/tools/bash.go"));
+        assert_eq!(importers[0].1, 3);
     }
 
     #[test]
