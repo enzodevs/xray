@@ -16,8 +16,10 @@ pub enum LanguageKind {
     Ts,
     Sql,
     Py,
+    Php,
     Rs,
     Svelte,
+    Vue,
     Md,
 }
 
@@ -38,11 +40,17 @@ impl LanguageKind {
         if is_python_extension(ext) {
             return Some(Self::Py);
         }
+        if is_php_extension(ext) {
+            return Some(Self::Php);
+        }
         if is_rust_extension(ext) {
             return Some(Self::Rs);
         }
         if is_svelte_extension(ext) {
             return Some(Self::Svelte);
+        }
+        if is_vue_extension(ext) {
+            return Some(Self::Vue);
         }
         if is_markdown_extension(ext) {
             return Some(Self::Md);
@@ -56,8 +64,10 @@ impl LanguageKind {
             Self::Sql => Ok(tree_sitter_sequel::LANGUAGE.into()),
             Self::Ts => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             Self::Py => Ok(tree_sitter_python::LANGUAGE.into()),
+            Self::Php => Ok(tree_sitter_php::LANGUAGE_PHP.into()),
             Self::Rs => Ok(tree_sitter_rust::LANGUAGE.into()),
             Self::Svelte => Ok(tree_sitter_svelte_ng::LANGUAGE.into()),
+            Self::Vue => Ok(tree_sitter_vue3::LANGUAGE.into()),
             Self::Md => Err(XrayError::UnsupportedFeature {
                 feature: "tree-sitter parser",
                 language: "Markdown",
@@ -71,9 +81,14 @@ impl LanguageKind {
             Self::Ts if matches_tsx_extension(ext) => {
                 Ok(tree_sitter_typescript::LANGUAGE_TSX.into())
             }
-            Self::Sql | Self::Ts | Self::Py | Self::Rs | Self::Svelte | Self::Md => {
-                self.tree_sitter_language()
-            }
+            Self::Sql
+            | Self::Ts
+            | Self::Py
+            | Self::Php
+            | Self::Rs
+            | Self::Svelte
+            | Self::Vue
+            | Self::Md => self.tree_sitter_language(),
         }
     }
 
@@ -83,8 +98,10 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_symbols(root, src),
             Self::Sql => extract::extract_sql_symbols(root, src),
             Self::Py => extract::extract_py_symbols(root, src),
+            Self::Php => extract::extract_php_symbols(root, src),
             Self::Rs => extract::extract_rs_symbols(root, src),
             Self::Svelte => extract::extract_svelte_symbols(root, src),
+            Self::Vue => extract::extract_vue_symbols(root, src),
             Self::Md => FileSymbols {
                 imports: Vec::new(),
                 import_bindings: Vec::new(),
@@ -104,8 +121,10 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_sources_only(root, src),
             Self::Sql => extract::extract_sql_sources_only(src),
             Self::Py => extract::extract_py_sources_only(root, src),
+            Self::Php => extract::extract_php_sources_only(root, src),
             Self::Rs => extract::extract_rs_sources_only(root, src),
             Self::Svelte => extract::extract_svelte_sources_only(root, src),
+            Self::Vue => extract::extract_vue_sources_only(root, src),
             Self::Md => Vec::new(),
         }
     }
@@ -113,11 +132,11 @@ impl LanguageKind {
     /// Collect dependency specifiers from an already-extracted symbol table.
     pub fn collect_dependency_specifiers(self, content: &FileContent) -> Vec<String> {
         match (self, content) {
-            (Self::Ts | Self::Svelte, FileContent::Code(symbols)) => {
+            (Self::Ts | Self::Svelte | Self::Vue, FileContent::Code(symbols)) => {
                 resolve::collect_sources(&symbols.imports, &symbols.reexports)
             }
-            // SQL includes are stored in `imports`; SQL has no re-export concept.
-            (Self::Sql | Self::Py | Self::Rs, FileContent::Code(symbols)) => {
+            // SQL includes are stored in `imports`; PHP/Python/Rust use backend-specific specifiers.
+            (Self::Sql | Self::Py | Self::Php | Self::Rs, FileContent::Code(symbols)) => {
                 dedupe_strings(&symbols.imports)
             }
             (Self::Md, FileContent::Markdown(document)) => document
@@ -144,9 +163,12 @@ impl LanguageKind {
         path_config: Option<&resolve::PathConfig>,
     ) -> Option<PathBuf> {
         match self {
-            Self::Ts | Self::Svelte => resolve::resolve_import(specifier, from_file, path_config),
+            Self::Ts | Self::Svelte | Self::Vue => {
+                resolve::resolve_import(specifier, from_file, path_config)
+            }
             Self::Sql => resolve::resolve_sql_include(specifier, from_file),
             Self::Py => resolve::resolve_py_import(specifier, from_file),
+            Self::Php => resolve::resolve_php_import(specifier, from_file),
             Self::Rs => resolve::resolve_rs_import(specifier, from_file),
             Self::Md => resolve::resolve_markdown_link(specifier, from_file),
         }
@@ -155,7 +177,7 @@ impl LanguageKind {
     /// Human-facing label for symbol references in this ecosystem.
     pub fn symbol_ref_label(self) -> &'static str {
         match self {
-            Self::Ts | Self::Py | Self::Rs | Self::Svelte => "calls",
+            Self::Ts | Self::Py | Self::Php | Self::Rs | Self::Svelte | Self::Vue => "calls",
             Self::Sql => "refs",
             Self::Md => "links",
         }
@@ -167,15 +189,17 @@ impl LanguageKind {
             Self::Ts => "TypeScript/JavaScript",
             Self::Sql => "SQL",
             Self::Py => "Python",
+            Self::Php => "PHP",
             Self::Rs => "Rust",
             Self::Svelte => "Svelte",
+            Self::Vue => "Vue",
             Self::Md => "Markdown",
         }
     }
 
     /// Whether this ecosystem currently supports trace mode.
     pub fn supports_trace(self) -> bool {
-        matches!(self, Self::Ts | Self::Svelte)
+        matches!(self, Self::Ts | Self::Svelte | Self::Vue)
     }
 
     /// Whether this ecosystem currently supports LSP-assisted trace resolution.
@@ -211,12 +235,20 @@ fn is_python_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("py")
 }
 
+fn is_php_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("php")
+}
+
 fn is_rust_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("rs")
 }
 
 fn is_svelte_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("svelte")
+}
+
+fn is_vue_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("vue")
 }
 
 fn is_markdown_extension(ext: &str) -> bool {
@@ -283,6 +315,8 @@ mod tests {
         assert_eq!(LanguageKind::for_extension("SQL"), Some(LanguageKind::Sql));
         assert_eq!(LanguageKind::for_extension("py"), Some(LanguageKind::Py));
         assert_eq!(LanguageKind::for_extension("PY"), Some(LanguageKind::Py));
+        assert_eq!(LanguageKind::for_extension("php"), Some(LanguageKind::Php));
+        assert_eq!(LanguageKind::for_extension("PHP"), Some(LanguageKind::Php));
         assert_eq!(LanguageKind::for_extension("md"), Some(LanguageKind::Md));
         assert_eq!(LanguageKind::for_extension("rs"), Some(LanguageKind::Rs));
         assert_eq!(LanguageKind::for_extension("RS"), Some(LanguageKind::Rs));
@@ -294,6 +328,8 @@ mod tests {
             LanguageKind::for_extension("SVELTE"),
             Some(LanguageKind::Svelte)
         );
+        assert_eq!(LanguageKind::for_extension("vue"), Some(LanguageKind::Vue));
+        assert_eq!(LanguageKind::for_extension("VUE"), Some(LanguageKind::Vue));
         assert_eq!(LanguageKind::for_extension("toml"), None);
     }
 
@@ -342,6 +378,23 @@ mod tests {
     }
 
     #[test]
+    fn php_backend_extracts_php_dependencies_only() {
+        let src = br"<?php
+            use App\Services\UserService;
+            require './bootstrap.php';
+        ";
+        let tree = parse_with(LanguageKind::Php, "php", src);
+        let deps = LanguageKind::Php.extract_dependency_specifiers_from_ast(tree.root_node(), src);
+        assert_eq!(
+            deps,
+            vec![
+                "App\\Services\\UserService".to_string(),
+                "./bootstrap.php".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn svelte_backend_extracts_script_dependencies_only() {
         let src = br#"
             <script>
@@ -360,6 +413,23 @@ mod tests {
     }
 
     #[test]
+    fn vue_backend_extracts_script_dependencies_only() {
+        let src = br#"
+            <script setup lang="ts">
+              import Child from "./Child.vue";
+              export { helper } from "./helper";
+            </script>
+            <template><Child /></template>
+        "#;
+        let tree = parse_with(LanguageKind::Vue, "vue", src);
+        let deps = LanguageKind::Vue.extract_dependency_specifiers_from_ast(tree.root_node(), src);
+        assert_eq!(
+            deps,
+            vec!["./Child.vue".to_string(), "./helper".to_string()]
+        );
+    }
+
+    #[test]
     fn ts_and_sql_collect_dependency_specifiers_use_isolated_rules() {
         let mut symbols = empty_symbols();
         symbols.imports = vec!["./one".to_string(), "./one".to_string()];
@@ -372,16 +442,20 @@ mod tests {
         let content = FileContent::Code(symbols);
         let ts_sources = LanguageKind::Ts.collect_dependency_specifiers(&content);
         let svelte_sources = LanguageKind::Svelte.collect_dependency_specifiers(&content);
+        let vue_sources = LanguageKind::Vue.collect_dependency_specifiers(&content);
         let sql_sources = LanguageKind::Sql.collect_dependency_specifiers(&content);
         let py_sources = LanguageKind::Py.collect_dependency_specifiers(&content);
+        let php_sources = LanguageKind::Php.collect_dependency_specifiers(&content);
 
         assert_eq!(ts_sources, vec!["./one".to_string(), "./two".to_string()]);
         assert_eq!(
             svelte_sources,
             vec!["./one".to_string(), "./two".to_string()]
         );
+        assert_eq!(vue_sources, vec!["./one".to_string(), "./two".to_string()]);
         assert_eq!(sql_sources, vec!["./one".to_string()]);
         assert_eq!(py_sources, vec!["./one".to_string()]);
+        assert_eq!(php_sources, vec!["./one".to_string()]);
     }
 
     #[test]
@@ -446,6 +520,18 @@ mod tests {
     }
 
     #[test]
+    fn php_backend_resolves_relative_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("main.php");
+        let target = dir.path().join("bootstrap.php");
+        fs::write(&entry, "<?php").unwrap();
+        fs::write(&target, "<?php").unwrap();
+
+        let resolved = LanguageKind::Php.resolve_source_specifier("./bootstrap", &entry, None);
+        assert_eq!(resolved, Some(target));
+    }
+
+    #[test]
     fn ts_backend_uses_ts_path_alias_resolution() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
@@ -474,8 +560,10 @@ mod tests {
         assert_eq!(LanguageKind::Ts.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Sql.symbol_ref_label(), "refs");
         assert_eq!(LanguageKind::Py.symbol_ref_label(), "calls");
+        assert_eq!(LanguageKind::Php.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Rs.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Svelte.symbol_ref_label(), "calls");
+        assert_eq!(LanguageKind::Vue.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Md.symbol_ref_label(), "links");
     }
 
@@ -487,10 +575,14 @@ mod tests {
         assert!(!LanguageKind::Sql.supports_lsp());
         assert!(!LanguageKind::Py.supports_trace());
         assert!(!LanguageKind::Py.supports_lsp());
+        assert!(!LanguageKind::Php.supports_trace());
+        assert!(!LanguageKind::Php.supports_lsp());
         assert!(!LanguageKind::Rs.supports_trace());
         assert!(!LanguageKind::Rs.supports_lsp());
         assert!(LanguageKind::Svelte.supports_trace());
         assert!(LanguageKind::Svelte.supports_lsp());
+        assert!(LanguageKind::Vue.supports_trace());
+        assert!(!LanguageKind::Vue.supports_lsp());
         assert!(!LanguageKind::Md.supports_trace());
         assert!(!LanguageKind::Md.supports_lsp());
     }

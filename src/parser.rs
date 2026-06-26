@@ -42,8 +42,10 @@ pub fn parse_file(path: &Path) -> Result<ParsedFile, XrayError> {
         LanguageKind::Ts
         | LanguageKind::Sql
         | LanguageKind::Py
+        | LanguageKind::Php
         | LanguageKind::Rs
-        | LanguageKind::Svelte => {
+        | LanguageKind::Svelte
+        | LanguageKind::Vue => {
             let language = detect_language(ext)?;
             let mut parser = Parser::new();
             parser

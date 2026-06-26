@@ -4,7 +4,9 @@ use crate::model::ReExport;
 
 use super::{shared, PathConfig};
 
-const EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "mjs", "cjs", "svelte"];
+const EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "js", "jsx", "mts", "mjs", "cjs", "svelte", "vue",
+];
 
 /// Merge import specifiers and re-export sources into a deduplicated list.
 pub(crate) fn collect_sources(imports: &[String], reexports: &[ReExport]) -> Vec<String> {
@@ -296,7 +298,7 @@ mod tests {
     fn try_extensions_finds_extended_ts_ecosystem_files() {
         let dir = tempfile::tempdir().unwrap();
 
-        for ext in ["mts", "mjs", "cjs", "svelte"] {
+        for ext in ["mts", "mjs", "cjs", "svelte", "vue"] {
             let stem = format!("entry_{ext}");
             let file = dir.path().join(format!("{stem}.{ext}"));
             fs::write(&file, "export const x = 1;").unwrap();

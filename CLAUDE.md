@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TS/JS, Svelte, Python, Rust, SQL, and Markdown files. ~10x compression.
+Structural code and docs digest for TS/JS, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. ~10x compression.
 
 ## Build & Verify
 
@@ -28,14 +28,15 @@ xray --no-follow <file>          # plain: single file digest only
 | File | Role |
 |------|------|
 | `main.rs` | CLI arg parsing (Mode enum) + dispatch |
-| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Rs/Svelte/Md): central dispatch for extraction, resolution, capabilities |
+| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Php/Rs/Svelte/Vue/Md): central dispatch for extraction, resolution, capabilities |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
 | `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server` integration |
-| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + Rust + SQL + Markdown links) |
-| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
+| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + PHP + Rust + SQL + Markdown links) |
+| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, `resolve::php`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
 | `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
 | `resolve/py.rs` | Python import resolution: relative (`.`/`..`) + local project modules/packages |
+| `resolve/php.rs` | PHP import resolution: relative include paths + basic namespace-to-path lookup |
 | `resolve/rs.rs` | Rust module resolution: `mod`, `crate::`, `super::`, `self::` paths |
 | `resolve/sql.rs` | SQL include resolution: `resolve_sql_include` (bare + relative paths) |
 | `resolve/markdown.rs` | Markdown link resolution: local relative links + fragment stripping |
@@ -45,8 +46,10 @@ xray --no-follow <file>          # plain: single file digest only
 | `extract/mod.rs` | Backend entrypoints: TS/Python/Rust/SQL/Markdown extraction + integration tests |
 | `extract/markdown.rs` | Markdown extraction (headings, links, frontmatter, fenced code blocks) |
 | `extract/python.rs` | Python extraction (imports, public/internal funcs, classes/dataclasses, calls, `__all__`) |
+| `extract/php.rs` | PHP extraction (`use`, include/require, funcs, classes/interfaces/traits/enums, calls) |
 | `extract/rust.rs` | Rust extraction (use/mod, pub/private fns, structs/enums/traits/impls, derives, tests, calls) |
 | `extract/svelte.rs` | Svelte extraction (template components + `<script>` imports/exports/types/calls via TS backend) |
+| `extract/vue.rs` | Vue extraction (template components/directive calls + `<script>` imports/exports/types/calls via TS backend) |
 | `extract/sql.rs` | SQL statement extraction (SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE) + include directives |
 | `extract/jsx.rs` | JSX detection + hierarchy tree (`returns_jsx`, `extract_jsx_components`) |
 | `extract/hooks.rs` | React hooks extraction |

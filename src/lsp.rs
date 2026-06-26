@@ -259,7 +259,9 @@ fn server_command(language_kind: LanguageKind) -> (&'static str, &'static [&'sta
         LanguageKind::Ts
         | LanguageKind::Sql
         | LanguageKind::Py
+        | LanguageKind::Php
         | LanguageKind::Rs
+        | LanguageKind::Vue
         | LanguageKind::Md => ("typescript-language-server", &["--stdio"]),
     }
 }
@@ -271,6 +273,8 @@ fn language_id(path: &Path) -> &'static str {
         Some("tsx") => "typescriptreact",
         Some("jsx") => "javascriptreact",
         Some("svelte") => "svelte",
+        Some("vue") => "vue",
+        Some("php") => "php",
         _ => "javascript",
     }
 }
@@ -317,6 +321,8 @@ mod tests {
         assert_eq!(language_id(Path::new("a.mjs")), "javascript");
         assert_eq!(language_id(Path::new("a.cjs")), "javascript");
         assert_eq!(language_id(Path::new("a.svelte")), "svelte");
+        assert_eq!(language_id(Path::new("a.vue")), "vue");
+        assert_eq!(language_id(Path::new("a.php")), "php");
     }
 
     #[test]

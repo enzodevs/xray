@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TypeScript/JavaScript, Svelte, Python, Rust, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
+Structural code and docs digest for TypeScript/JavaScript, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
 
 Built for LLM context windows — feed xray output instead of raw source to save tokens while preserving structural understanding.
 
@@ -120,6 +120,30 @@ types:
   type User {id, name, avatar}  [L3-3]
 ```
 
+### Vue
+
+```sh
+$ xray components/AppShell.vue
+```
+
+```
+components/AppShell.vue  (vue, 24 lines)
+
+imports: @/components/ui/sidebar, @/types
+
+exports:
+  [component] default component  [L1-24]
+    calls: usePage
+    renders: SidebarProvider
+
+internal:
+  const props = defineProps(...)  [L7-7]
+  const isOpen = usePage(...)  [L12-12]
+
+types:
+  type Props {variant}  [L5-7]
+```
+
 ### SQL
 
 ```sh
@@ -196,6 +220,18 @@ Each function also shows:
 | **types** | TypeScript types declared in `<script lang="ts">` |
 | **renders** | Svelte component tree from markup: `Layout > [Header, Slot]` |
 
+### Vue
+
+| Section | Content |
+|---------|---------|
+| **imports** | `<script>` module sources, including `.vue` components and local script `src` attributes |
+| **re-exports** | `<script>` re-exports grouped by source |
+| **exports** | The file's default component from `<template>` |
+| **internal** | `<script setup>` and normal script functions/consts extracted through the TS/JS backend |
+| **hooks** | Vue macros, lifecycle calls, refs/computed/watch, and `use*` composables |
+| **types** | TypeScript types declared in `<script lang="ts">` |
+| **renders** | Vue component tree from template tags: `Layout > [Header, user-card]` |
+
 ### Python
 
 | Section | Content |
@@ -209,6 +245,19 @@ Each function also shows:
 Notes:
 - `--trace` and `--lsp` are not supported for Python yet.
 - Import resolution for follow/who is local-project only (no virtualenv/site-packages).
+
+### PHP
+
+| Section | Content |
+|---------|---------|
+| **imports** | `use` declarations plus static `include` / `require` paths |
+| **exports** | Top-level constants and functions |
+| **types** | Classes, interfaces, traits, and enums, with member summaries |
+| **calls** | Function, method, static call, include, and require calls inside functions |
+
+Notes:
+- `--trace` and `--lsp` are not supported for PHP yet.
+- Follow/who resolution supports relative include paths and basic local namespace-to-path lookup.
 
 ### SQL
 
@@ -240,19 +289,21 @@ Notes:
 | **Trace symbol** | `--trace -s NAME` | Traces a single specific exported symbol |
 
 The `--all` flag disables noise filtering in follow and trace modes.
-`--trace` supports TypeScript/JavaScript and Svelte files. `--lsp` uses `typescript-language-server` for TypeScript/JavaScript and `svelte-language-server` for Svelte when installed. For Markdown, follow and `--who` work on local links; trace is unsupported.
+`--trace` supports TypeScript/JavaScript, Vue, and Svelte files. `--lsp` uses `typescript-language-server` for TypeScript/JavaScript and `svelte-language-server` for Svelte when installed; Vue trace does not require or use a Vue language server. For Markdown, follow and `--who` work on local links; trace is unsupported.
 
 ## Supported files
 
-`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.svelte`, `.py`, `.rs`, `.sql`, `.md`
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.vue`, `.svelte`, `.py`, `.php`, `.rs`, `.sql`, `.md`
 
 ## How it works
 
 xray uses [tree-sitter](https://tree-sitter.github.io/) for code files and a dedicated Markdown parser for `.md` files, then walks those parsed structures to extract structural information. No regex, no string matching — just syntax-aware extraction.
 
 - **TypeScript/JavaScript**: `tree-sitter-typescript`
+- **Vue**: `octorus-tree-sitter-vue3` plus `tree-sitter-typescript` for `<script>` blocks
 - **Svelte**: `tree-sitter-svelte-ng` plus `tree-sitter-typescript` for `<script>` blocks
 - **Python**: `tree-sitter-python`
+- **PHP**: `tree-sitter-php`
 - **Rust**: `tree-sitter-rust`
 - **SQL**: `tree-sitter-sequel`
 - **Markdown**: `markdown`

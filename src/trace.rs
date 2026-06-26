@@ -746,6 +746,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_trace_capabilities_allows_vue_without_lsp() {
+        let cfg = default_trace_config();
+        let result = validate_trace_capabilities(LanguageKind::Vue, &cfg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_trace_capabilities_rejects_vue_lsp() {
+        let mut cfg = default_trace_config();
+        cfg.use_lsp = true;
+
+        let err = validate_trace_capabilities(LanguageKind::Vue, &cfg).unwrap_err();
+        match err {
+            XrayError::UnsupportedFeature { feature, language } => {
+                assert_eq!(feature, "--lsp");
+                assert_eq!(language, "Vue");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_trace_capabilities_rejects_sql_trace() {
         let cfg = default_trace_config();
         let err = validate_trace_capabilities(LanguageKind::Sql, &cfg).unwrap_err();
@@ -766,6 +788,19 @@ mod tests {
             XrayError::UnsupportedFeature { feature, language } => {
                 assert_eq!(feature, "--trace");
                 assert_eq!(language, "Python");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_trace_capabilities_rejects_php_trace() {
+        let cfg = default_trace_config();
+        let err = validate_trace_capabilities(LanguageKind::Php, &cfg).unwrap_err();
+        match err {
+            XrayError::UnsupportedFeature { feature, language } => {
+                assert_eq!(feature, "--trace");
+                assert_eq!(language, "PHP");
             }
             other => panic!("expected UnsupportedFeature, got {other:?}"),
         }

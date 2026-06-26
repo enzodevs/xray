@@ -1,4 +1,5 @@
 mod markdown;
+mod php;
 mod py;
 mod rs;
 mod shared;
@@ -18,6 +19,7 @@ pub struct PathConfig {
 }
 
 pub(crate) use markdown::resolve_markdown_link;
+pub(crate) use php::resolve_php_import;
 pub(crate) use py::resolve_py_import;
 pub(crate) use rs::resolve_rs_import;
 pub(crate) use sql::resolve_sql_include;

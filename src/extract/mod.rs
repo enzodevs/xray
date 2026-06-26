@@ -3,12 +3,14 @@ mod decorators;
 mod hooks;
 mod jsx;
 mod markdown;
+mod php;
 mod python;
 mod rust;
 mod sql;
 mod svelte;
 mod tests_block;
 mod types;
+mod vue;
 
 use tree_sitter::Node;
 
@@ -28,6 +30,11 @@ pub(crate) fn extract_sql_symbols(root: Node, src: &[u8]) -> FileSymbols {
 /// Python ecosystem extractor entrypoint (explicit backend boundary).
 pub(crate) fn extract_py_symbols(root: Node, src: &[u8]) -> FileSymbols {
     python::extract_symbols(root, src)
+}
+
+/// PHP ecosystem extractor entrypoint (explicit backend boundary).
+pub(crate) fn extract_php_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    php::extract_symbols(root, src)
 }
 
 /// Markdown document extractor entrypoint.
@@ -53,6 +60,11 @@ pub(crate) fn extract_py_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     python::extract_sources_only(root, src)
 }
 
+/// PHP ecosystem dependency extractor entrypoint.
+pub(crate) fn extract_php_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    php::extract_sources_only(root, src)
+}
+
 /// Rust ecosystem extractor entrypoint (explicit backend boundary).
 pub(crate) fn extract_rs_symbols(root: Node, src: &[u8]) -> FileSymbols {
     rust::extract_symbols(root, src)
@@ -71,6 +83,16 @@ pub(crate) fn extract_svelte_symbols(root: Node, src: &[u8]) -> FileSymbols {
 /// Svelte ecosystem dependency extractor entrypoint (`<script>` imports/re-exports only).
 pub(crate) fn extract_svelte_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     svelte::extract_sources_only_from_svelte(root, src)
+}
+
+/// Vue ecosystem extractor entrypoint.
+pub(crate) fn extract_vue_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    vue::extract_symbols_from_vue(root, src)
+}
+
+/// Vue ecosystem dependency extractor entrypoint (`<script>` imports/re-exports only).
+pub(crate) fn extract_vue_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    vue::extract_sources_only_from_vue(root, src)
 }
 
 /// Markdown dependency extractor entrypoint (local links only).
