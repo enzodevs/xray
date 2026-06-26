@@ -63,7 +63,8 @@ impl FileDigest {
     }
 
     pub fn dependency_specifiers(&self) -> Vec<String> {
-        self.language_kind.collect_dependency_specifiers(&self.content)
+        self.language_kind
+            .collect_dependency_specifiers(&self.content)
     }
 
     pub fn code_symbols(&self) -> Option<&FileSymbols> {
@@ -80,7 +81,7 @@ impl FileDigest {
 /// `"class MyService extends Base"` → `"MyService"`
 /// `"public async send(msg: string)"` → `"send"`
 pub(crate) fn extract_name_from_signature(sig: &str) -> String {
-    let s = sig
+    let mut s = sig
         .trim_start_matches("public ")
         .trim_start_matches("private ")
         .trim_start_matches("protected ")
@@ -96,9 +97,13 @@ pub(crate) fn extract_name_from_signature(sig: &str) -> String {
         .trim_start_matches("interface ")
         .trim_start_matches("trait ")
         .trim_start_matches("enum ")
+        .trim_start_matches("func ")
         .trim_start_matches("fn ")
         .trim_start_matches("unsafe ")
         .trim_start_matches("fn ");
+    if let Some(rest) = s.strip_prefix('(').and_then(|s| s.split_once(") ")) {
+        s = rest.1;
+    }
     s.split(['(', '=', '<', ' '])
         .next()
         .unwrap_or("?")
@@ -412,6 +417,14 @@ mod tests {
     #[test]
     fn extract_name_from_signature_python_def() {
         assert_eq!(extract_name_from_signature("def run(user_id: int)"), "run");
+    }
+
+    #[test]
+    fn extract_name_from_signature_go_method() {
+        assert_eq!(
+            extract_name_from_signature("func (s *Store) Run(ctx context.Context) error"),
+            "Run"
+        );
     }
 
     #[test]

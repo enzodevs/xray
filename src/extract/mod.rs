@@ -1,5 +1,6 @@
 mod calls;
 mod decorators;
+mod go;
 mod hooks;
 mod jsx;
 mod markdown;
@@ -32,6 +33,11 @@ pub(crate) fn extract_py_symbols(root: Node, src: &[u8]) -> FileSymbols {
     python::extract_symbols(root, src)
 }
 
+/// Go ecosystem extractor entrypoint (explicit backend boundary).
+pub(crate) fn extract_go_symbols(root: Node, src: &[u8]) -> FileSymbols {
+    go::extract_symbols(root, src)
+}
+
 /// PHP ecosystem extractor entrypoint (explicit backend boundary).
 pub(crate) fn extract_php_symbols(root: Node, src: &[u8]) -> FileSymbols {
     php::extract_symbols(root, src)
@@ -58,6 +64,11 @@ pub(crate) fn extract_sql_sources_only(src: &[u8]) -> Vec<String> {
 /// Python ecosystem dependency extractor entrypoint (import statements only).
 pub(crate) fn extract_py_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     python::extract_sources_only(root, src)
+}
+
+/// Go ecosystem dependency extractor entrypoint.
+pub(crate) fn extract_go_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    go::extract_sources_only(root, src)
 }
 
 /// PHP ecosystem dependency extractor entrypoint.

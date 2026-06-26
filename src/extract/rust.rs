@@ -140,8 +140,7 @@ fn flatten_use_tree(
     bindings: &mut Vec<ImportBinding>,
 ) {
     match node.kind() {
-        "scoped_identifier" | "identifier" | "crate" | "self" | "super"
-        | "metavariable" => {
+        "scoped_identifier" | "identifier" | "crate" | "self" | "super" | "metavariable" => {
             let path = txt(node, src).trim().to_string();
             if !path.is_empty() {
                 push_unique(imports, path.clone());
@@ -171,8 +170,8 @@ fn flatten_use_tree(
             }
             if let Some(source) = source {
                 push_unique(imports, source.clone());
-                let local =
-                    alias.unwrap_or_else(|| source.rsplit("::").next().unwrap_or(&source).to_string());
+                let local = alias
+                    .unwrap_or_else(|| source.rsplit("::").next().unwrap_or(&source).to_string());
                 bindings.push(ImportBinding {
                     local_name: local,
                     source,
@@ -281,12 +280,7 @@ fn flatten_use_list(
 
 // ── functions ─────────────────────────────────────────────────────────
 
-fn extract_function(
-    node: Node,
-    src: &[u8],
-    decorators: Vec<String>,
-    symbols: &mut FileSymbols,
-) {
+fn extract_function(node: Node, src: &[u8], decorators: Vec<String>, symbols: &mut FileSymbols) {
     let Some(name) = item_name(node, src) else {
         return;
     };
@@ -484,12 +478,7 @@ fn extract_macro_definition(
 
 // ── mod declarations ──────────────────────────────────────────────────
 
-fn extract_mod(
-    node: Node,
-    src: &[u8],
-    attrs: &[String],
-    symbols: &mut FileSymbols,
-) {
+fn extract_mod(node: Node, src: &[u8], attrs: &[String], symbols: &mut FileSymbols) {
     if has_body(node) {
         // Inline module: check for #[cfg(test)] mod tests { ... }
         if is_cfg_test(attrs) {
@@ -582,7 +571,9 @@ fn collect_calls_recursive(node: Node, src: &[u8], calls: &mut Vec<String>) {
 }
 
 fn call_name(node: Node, src: &[u8]) -> Option<String> {
-    let callee = node.child_by_field_name("function").or_else(|| node.named_child(0))?;
+    let callee = node
+        .child_by_field_name("function")
+        .or_else(|| node.named_child(0))?;
     let raw = match callee.kind() {
         "call_expression" => return call_name(callee, src),
         _ => txt(callee, src).trim().to_string(),
@@ -595,7 +586,9 @@ fn call_name(node: Node, src: &[u8]) -> Option<String> {
 }
 
 fn macro_call_name(node: Node, src: &[u8]) -> Option<String> {
-    let macro_node = node.child_by_field_name("macro").or_else(|| node.named_child(0))?;
+    let macro_node = node
+        .child_by_field_name("macro")
+        .or_else(|| node.named_child(0))?;
     let name = txt(macro_node, src).trim().to_string();
     if name.is_empty() {
         None
@@ -623,14 +616,22 @@ fn is_pub(node: Node) -> bool {
 fn item_name(node: Node, src: &[u8]) -> Option<String> {
     let name_node = node.child_by_field_name("name")?;
     let name = txt(name_node, src).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 fn type_name(node: Node, src: &[u8]) -> Option<String> {
     // Structs, enums, traits, type aliases use `type_identifier` for their name
     let name_node = node.child_by_field_name("name")?;
     let name = txt(name_node, src).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 fn item_signature(node: Node, src: &[u8]) -> String {
@@ -680,7 +681,9 @@ fn has_body(node: Node) -> bool {
 }
 
 fn has_test_attr(attrs: &[String]) -> bool {
-    attrs.iter().any(|a| a == "test" || a == "tokio::test" || a == "rstest")
+    attrs
+        .iter()
+        .any(|a| a == "test" || a == "tokio::test" || a == "rstest")
 }
 
 fn is_cfg_test(attrs: &[String]) -> bool {
@@ -806,7 +809,8 @@ fn impl_names(node: Node, src: &[u8]) -> (String, String) {
         if child.kind() == "for" || txt(child, src).trim() == "for" {
             has_for = true;
         }
-        if child.kind() == "type_identifier" || child.kind() == "generic_type"
+        if child.kind() == "type_identifier"
+            || child.kind() == "generic_type"
             || child.kind() == "scoped_type_identifier"
         {
             type_ids.push(txt(child, src).trim().to_string());
@@ -1032,7 +1036,9 @@ const PRIVATE: i32 = 42;
         assert!(symbols.exports[0].signature.contains("const MAX: usize"));
         assert!(symbols.exports[1].signature.contains("static GLOBAL: &str"));
         assert_eq!(symbols.internals.len(), 1);
-        assert!(symbols.internals[0].signature.contains("const PRIVATE: i32"));
+        assert!(symbols.internals[0]
+            .signature
+            .contains("const PRIVATE: i32"));
     }
 
     #[test]

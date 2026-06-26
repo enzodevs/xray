@@ -103,9 +103,11 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
                 let mut seen_sources = HashSet::new();
                 for binding in &entry_symbols.import_bindings {
                     if seen_sources.insert(&binding.source) {
-                        if let Some(resolved) =
-                            resolve::resolve_import(&binding.source, &entry, path_config.as_ref())
-                        {
+                        if let Some(resolved) = digest.language_kind.resolve_source_specifier(
+                            &binding.source,
+                            &entry,
+                            path_config.as_ref(),
+                        ) {
                             import_paths.push(resolved);
                         }
                     }
@@ -153,6 +155,7 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
                 1,
                 config,
                 path_config.as_ref(),
+                digest.language_kind,
                 &mut visited,
                 lsp.as_mut(),
             );
@@ -212,6 +215,7 @@ fn resolve_call(
     symbols: &FileSymbols,
     file_path: &Path,
     path_config: Option<&PathConfig>,
+    language_kind: LanguageKind,
 ) -> CallTarget {
     // 1. Local symbol in same file (exports + internals)
     for sym in symbols.exports.iter().chain(symbols.internals.iter()) {
@@ -228,7 +232,8 @@ fn resolve_call(
     // 2. Imported binding
     for binding in &symbols.import_bindings {
         if binding.local_name == call_name {
-            let Some(resolved) = resolve::resolve_import(&binding.source, file_path, path_config)
+            let Some(resolved) =
+                language_kind.resolve_source_specifier(&binding.source, file_path, path_config)
             else {
                 return CallTarget::Unresolved {
                     reason: UnresolvedReason::UnresolvedImport(binding.source.clone()),
@@ -297,12 +302,13 @@ fn build_call_tree(
     depth: usize,
     config: &TraceConfig,
     path_config: Option<&PathConfig>,
+    language_kind: LanguageKind,
     visited: &mut HashSet<(PathBuf, String)>,
     mut lsp: Option<&mut LspClient>,
 ) -> Vec<CallNode> {
     let mut nodes = Vec::with_capacity(calls.len());
     for call_name in calls {
-        let target = resolve_call(call_name, symbols, file_path, path_config);
+        let target = resolve_call(call_name, symbols, file_path, path_config, language_kind);
         let node = match target {
             CallTarget::Local {
                 line_start,
@@ -322,6 +328,7 @@ fn build_call_tree(
                         depth + 1,
                         config,
                         path_config,
+                        language_kind,
                         visited,
                         lsp.as_deref_mut(),
                     )
@@ -347,26 +354,19 @@ fn build_call_tree(
                 lsp.as_deref_mut(),
             ),
             CallTarget::Unresolved { reason } => {
-                if reason == UnresolvedReason::MemberCall {
-                    if let Some(client) = lsp.as_deref_mut() {
-                        if let Some(resolved) = try_lsp_resolve(
-                            call_name,
-                            file_path,
-                            caller_lines,
-                            client,
-                            depth,
-                            config,
-                            path_config,
-                            visited,
-                        ) {
-                            resolved
-                        } else {
-                            CallNode {
-                                call_name: call_name.clone(),
-                                location: CallLocation::Unresolved { reason },
-                                children: Vec::new(),
-                            }
-                        }
+                if let Some(client) = lsp.as_deref_mut() {
+                    if let Some(resolved) = try_lsp_resolve(
+                        call_name,
+                        file_path,
+                        caller_lines,
+                        client,
+                        depth,
+                        config,
+                        path_config,
+                        language_kind,
+                        visited,
+                    ) {
+                        resolved
                     } else {
                         CallNode {
                             call_name: call_name.clone(),
@@ -466,6 +466,7 @@ fn build_imported_node(
             depth + 1,
             config,
             path_config,
+            digest.language_kind,
             visited,
             lsp,
         )
@@ -499,6 +500,7 @@ fn try_lsp_resolve(
     depth: usize,
     config: &TraceConfig,
     path_config: Option<&PathConfig>,
+    language_kind: LanguageKind,
     visited: &mut HashSet<(PathBuf, String)>,
 ) -> Option<CallNode> {
     let method = call_name.rsplit('.').next()?;
@@ -567,6 +569,7 @@ fn try_lsp_resolve(
                 depth + 1,
                 config,
                 path_config,
+                language_kind,
                 visited,
                 Some(lsp),
             )
@@ -605,6 +608,7 @@ fn try_lsp_resolve(
                 depth + 1,
                 config,
                 path_config,
+                digest.language_kind,
                 visited,
                 Some(lsp),
             )
@@ -753,6 +757,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_trace_capabilities_allows_go_lsp() {
+        let mut cfg = default_trace_config();
+        cfg.use_lsp = true;
+        let result = validate_trace_capabilities(LanguageKind::Go, &cfg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn validate_trace_capabilities_rejects_vue_lsp() {
         let mut cfg = default_trace_config();
         cfg.use_lsp = true;
@@ -878,7 +890,13 @@ mod tests {
         let mut symbols = empty_symbols();
         symbols.exports.push(make_symbol("helper", vec![]));
 
-        let target = resolve_call("helper", &symbols, Path::new("/a.ts"), None);
+        let target = resolve_call(
+            "helper",
+            &symbols,
+            Path::new("/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         assert!(matches!(target, CallTarget::Local { .. }));
     }
 
@@ -887,7 +905,13 @@ mod tests {
         let mut symbols = empty_symbols();
         symbols.internals.push(make_symbol("helper", vec![]));
 
-        let target = resolve_call("helper", &symbols, Path::new("/a.ts"), None);
+        let target = resolve_call(
+            "helper",
+            &symbols,
+            Path::new("/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         assert!(matches!(target, CallTarget::Local { .. }));
     }
 
@@ -896,14 +920,26 @@ mod tests {
         let mut symbols = empty_symbols();
         symbols.exports.push(make_symbol("doWork", vec![]));
 
-        let target = resolve_call("this.doWork", &symbols, Path::new("/a.ts"), None);
+        let target = resolve_call(
+            "this.doWork",
+            &symbols,
+            Path::new("/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         assert!(matches!(target, CallTarget::Local { .. }));
     }
 
     #[test]
     fn resolve_call_this_method_not_found_is_member_call() {
         let symbols = empty_symbols();
-        let target = resolve_call("this.missing", &symbols, Path::new("/a.ts"), None);
+        let target = resolve_call(
+            "this.missing",
+            &symbols,
+            Path::new("/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         match target {
             CallTarget::Unresolved { reason } => assert_eq!(reason, UnresolvedReason::MemberCall),
             _ => panic!("expected Unresolved"),
@@ -913,7 +949,13 @@ mod tests {
     #[test]
     fn resolve_call_this_chained_stays_member_call() {
         let symbols = empty_symbols();
-        let target = resolve_call("this.service.method", &symbols, Path::new("/a.ts"), None);
+        let target = resolve_call(
+            "this.service.method",
+            &symbols,
+            Path::new("/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         match target {
             CallTarget::Unresolved { reason } => assert_eq!(reason, UnresolvedReason::MemberCall),
             _ => panic!("expected Unresolved"),
@@ -923,7 +965,13 @@ mod tests {
     #[test]
     fn resolve_call_member_is_unresolved() {
         let symbols = empty_symbols();
-        let target = resolve_call("obj.method", &symbols, Path::new("/a.ts"), None);
+        let target = resolve_call(
+            "obj.method",
+            &symbols,
+            Path::new("/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         match target {
             CallTarget::Unresolved { reason } => assert_eq!(reason, UnresolvedReason::MemberCall),
             _ => panic!("expected Unresolved"),
@@ -933,7 +981,13 @@ mod tests {
     #[test]
     fn resolve_call_external_is_unresolved() {
         let symbols = empty_symbols();
-        let target = resolve_call("unknownFn", &symbols, Path::new("/a.ts"), None);
+        let target = resolve_call(
+            "unknownFn",
+            &symbols,
+            Path::new("/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         match target {
             CallTarget::Unresolved { reason } => assert_eq!(reason, UnresolvedReason::External),
             _ => panic!("expected Unresolved"),
@@ -949,7 +1003,13 @@ mod tests {
             is_default: false,
         });
 
-        let target = resolve_call("fetchData", &symbols, Path::new("/src/a.ts"), None);
+        let target = resolve_call(
+            "fetchData",
+            &symbols,
+            Path::new("/src/a.ts"),
+            None,
+            LanguageKind::Ts,
+        );
         assert!(matches!(
             target,
             CallTarget::Imported { .. } | CallTarget::Unresolved { .. }

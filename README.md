@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TypeScript/JavaScript, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
+Structural code and docs digest for TypeScript/JavaScript, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
 
 Built for LLM context windows — feed xray output instead of raw source to save tokens while preserving structural understanding.
 
@@ -246,6 +246,21 @@ Notes:
 - `--trace` and `--lsp` are not supported for Python yet.
 - Import resolution for follow/who is local-project only (no virtualenv/site-packages).
 
+### Go
+
+| Section | Content |
+|---------|---------|
+| **imports** | Go import paths, including aliases for trace/LSP warm-up |
+| **exports** | Exported functions, methods, vars, and consts |
+| **internal** | Unexported functions, methods, vars, and consts |
+| **types** | Structs, interfaces, function types, aliases, and member summaries |
+| **tests** | `Test*`, `Benchmark*`, and `Fuzz*` functions |
+| **calls** | Function calls and selector calls such as `svc.Run` |
+
+Notes:
+- Follow/who resolves local packages through `go.mod` module paths and relative package imports.
+- `--trace` works from extracted calls. `--trace --lsp` uses `gopls` for selector calls and cross-file method definitions.
+
 ### PHP
 
 | Section | Content |
@@ -289,17 +304,18 @@ Notes:
 | **Trace symbol** | `--trace -s NAME` | Traces a single specific exported symbol |
 
 The `--all` flag disables noise filtering in follow and trace modes.
-`--trace` supports TypeScript/JavaScript, Vue, and Svelte files. `--lsp` uses `typescript-language-server` for TypeScript/JavaScript and `svelte-language-server` for Svelte when installed; Vue trace does not require or use a Vue language server. For Markdown, follow and `--who` work on local links; trace is unsupported.
+`--trace` supports TypeScript/JavaScript, Go, Vue, and Svelte files. `--lsp` uses `typescript-language-server` for TypeScript/JavaScript, `gopls` for Go, and `svelte-language-server` for Svelte when installed; Vue trace does not require or use a Vue language server. For Markdown, follow and `--who` work on local links; trace is unsupported.
 
 ## Supported files
 
-`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.vue`, `.svelte`, `.py`, `.php`, `.rs`, `.sql`, `.md`
+`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.go`, `.vue`, `.svelte`, `.py`, `.php`, `.rs`, `.sql`, `.md`
 
 ## How it works
 
 xray uses [tree-sitter](https://tree-sitter.github.io/) for code files and a dedicated Markdown parser for `.md` files, then walks those parsed structures to extract structural information. No regex, no string matching — just syntax-aware extraction.
 
 - **TypeScript/JavaScript**: `tree-sitter-typescript`
+- **Go**: `tree-sitter-go` plus optional `gopls` for `--trace --lsp`
 - **Vue**: `octorus-tree-sitter-vue3` plus `tree-sitter-typescript` for `<script>` blocks
 - **Svelte**: `tree-sitter-svelte-ng` plus `tree-sitter-typescript` for `<script>` blocks
 - **Python**: `tree-sitter-python`

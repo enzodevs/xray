@@ -16,6 +16,7 @@ pub enum LanguageKind {
     Ts,
     Sql,
     Py,
+    Go,
     Php,
     Rs,
     Svelte,
@@ -39,6 +40,9 @@ impl LanguageKind {
         }
         if is_python_extension(ext) {
             return Some(Self::Py);
+        }
+        if is_go_extension(ext) {
+            return Some(Self::Go);
         }
         if is_php_extension(ext) {
             return Some(Self::Php);
@@ -64,6 +68,7 @@ impl LanguageKind {
             Self::Sql => Ok(tree_sitter_sequel::LANGUAGE.into()),
             Self::Ts => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             Self::Py => Ok(tree_sitter_python::LANGUAGE.into()),
+            Self::Go => Ok(tree_sitter_go::LANGUAGE.into()),
             Self::Php => Ok(tree_sitter_php::LANGUAGE_PHP.into()),
             Self::Rs => Ok(tree_sitter_rust::LANGUAGE.into()),
             Self::Svelte => Ok(tree_sitter_svelte_ng::LANGUAGE.into()),
@@ -84,6 +89,7 @@ impl LanguageKind {
             Self::Sql
             | Self::Ts
             | Self::Py
+            | Self::Go
             | Self::Php
             | Self::Rs
             | Self::Svelte
@@ -98,6 +104,7 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_symbols(root, src),
             Self::Sql => extract::extract_sql_symbols(root, src),
             Self::Py => extract::extract_py_symbols(root, src),
+            Self::Go => extract::extract_go_symbols(root, src),
             Self::Php => extract::extract_php_symbols(root, src),
             Self::Rs => extract::extract_rs_symbols(root, src),
             Self::Svelte => extract::extract_svelte_symbols(root, src),
@@ -121,6 +128,7 @@ impl LanguageKind {
             Self::Ts => extract::extract_ts_sources_only(root, src),
             Self::Sql => extract::extract_sql_sources_only(src),
             Self::Py => extract::extract_py_sources_only(root, src),
+            Self::Go => extract::extract_go_sources_only(root, src),
             Self::Php => extract::extract_php_sources_only(root, src),
             Self::Rs => extract::extract_rs_sources_only(root, src),
             Self::Svelte => extract::extract_svelte_sources_only(root, src),
@@ -135,10 +143,11 @@ impl LanguageKind {
             (Self::Ts | Self::Svelte | Self::Vue, FileContent::Code(symbols)) => {
                 resolve::collect_sources(&symbols.imports, &symbols.reexports)
             }
-            // SQL includes are stored in `imports`; PHP/Python/Rust use backend-specific specifiers.
-            (Self::Sql | Self::Py | Self::Php | Self::Rs, FileContent::Code(symbols)) => {
-                dedupe_strings(&symbols.imports)
-            }
+            // SQL includes are stored in `imports`; Go/PHP/Python/Rust use backend-specific specifiers.
+            (
+                Self::Sql | Self::Py | Self::Go | Self::Php | Self::Rs,
+                FileContent::Code(symbols),
+            ) => dedupe_strings(&symbols.imports),
             (Self::Md, FileContent::Markdown(document)) => document
                 .links
                 .iter()
@@ -168,6 +177,7 @@ impl LanguageKind {
             }
             Self::Sql => resolve::resolve_sql_include(specifier, from_file),
             Self::Py => resolve::resolve_py_import(specifier, from_file),
+            Self::Go => resolve::resolve_go_import(specifier, from_file),
             Self::Php => resolve::resolve_php_import(specifier, from_file),
             Self::Rs => resolve::resolve_rs_import(specifier, from_file),
             Self::Md => resolve::resolve_markdown_link(specifier, from_file),
@@ -177,7 +187,9 @@ impl LanguageKind {
     /// Human-facing label for symbol references in this ecosystem.
     pub fn symbol_ref_label(self) -> &'static str {
         match self {
-            Self::Ts | Self::Py | Self::Php | Self::Rs | Self::Svelte | Self::Vue => "calls",
+            Self::Ts | Self::Py | Self::Go | Self::Php | Self::Rs | Self::Svelte | Self::Vue => {
+                "calls"
+            }
             Self::Sql => "refs",
             Self::Md => "links",
         }
@@ -189,6 +201,7 @@ impl LanguageKind {
             Self::Ts => "TypeScript/JavaScript",
             Self::Sql => "SQL",
             Self::Py => "Python",
+            Self::Go => "Go",
             Self::Php => "PHP",
             Self::Rs => "Rust",
             Self::Svelte => "Svelte",
@@ -199,12 +212,12 @@ impl LanguageKind {
 
     /// Whether this ecosystem currently supports trace mode.
     pub fn supports_trace(self) -> bool {
-        matches!(self, Self::Ts | Self::Svelte | Self::Vue)
+        matches!(self, Self::Ts | Self::Go | Self::Svelte | Self::Vue)
     }
 
     /// Whether this ecosystem currently supports LSP-assisted trace resolution.
     pub fn supports_lsp(self) -> bool {
-        matches!(self, Self::Ts | Self::Svelte)
+        matches!(self, Self::Ts | Self::Go | Self::Svelte)
     }
 }
 
@@ -233,6 +246,10 @@ fn matches_tsx_extension(ext: &str) -> bool {
 
 fn is_python_extension(ext: &str) -> bool {
     ext.eq_ignore_ascii_case("py")
+}
+
+fn is_go_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("go")
 }
 
 fn is_php_extension(ext: &str) -> bool {
@@ -315,6 +332,8 @@ mod tests {
         assert_eq!(LanguageKind::for_extension("SQL"), Some(LanguageKind::Sql));
         assert_eq!(LanguageKind::for_extension("py"), Some(LanguageKind::Py));
         assert_eq!(LanguageKind::for_extension("PY"), Some(LanguageKind::Py));
+        assert_eq!(LanguageKind::for_extension("go"), Some(LanguageKind::Go));
+        assert_eq!(LanguageKind::for_extension("GO"), Some(LanguageKind::Go));
         assert_eq!(LanguageKind::for_extension("php"), Some(LanguageKind::Php));
         assert_eq!(LanguageKind::for_extension("PHP"), Some(LanguageKind::Php));
         assert_eq!(LanguageKind::for_extension("md"), Some(LanguageKind::Md));
@@ -395,6 +414,26 @@ mod tests {
     }
 
     #[test]
+    fn go_backend_extracts_go_dependencies_only() {
+        let src = br#"
+            package service
+            import (
+                "context"
+                "example.com/app/internal/db"
+            )
+        "#;
+        let tree = parse_with(LanguageKind::Go, "go", src);
+        let deps = LanguageKind::Go.extract_dependency_specifiers_from_ast(tree.root_node(), src);
+        assert_eq!(
+            deps,
+            vec![
+                "context".to_string(),
+                "example.com/app/internal/db".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn svelte_backend_extracts_script_dependencies_only() {
         let src = br#"
             <script>
@@ -445,6 +484,7 @@ mod tests {
         let vue_sources = LanguageKind::Vue.collect_dependency_specifiers(&content);
         let sql_sources = LanguageKind::Sql.collect_dependency_specifiers(&content);
         let py_sources = LanguageKind::Py.collect_dependency_specifiers(&content);
+        let go_sources = LanguageKind::Go.collect_dependency_specifiers(&content);
         let php_sources = LanguageKind::Php.collect_dependency_specifiers(&content);
 
         assert_eq!(ts_sources, vec!["./one".to_string(), "./two".to_string()]);
@@ -455,6 +495,7 @@ mod tests {
         assert_eq!(vue_sources, vec!["./one".to_string(), "./two".to_string()]);
         assert_eq!(sql_sources, vec!["./one".to_string()]);
         assert_eq!(py_sources, vec!["./one".to_string()]);
+        assert_eq!(go_sources, vec!["./one".to_string()]);
         assert_eq!(php_sources, vec!["./one".to_string()]);
     }
 
@@ -532,6 +573,22 @@ mod tests {
     }
 
     #[test]
+    fn go_backend_resolves_module_package() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("go.mod"), "module example.com/app\n").unwrap();
+        let pkg = dir.path().join("internal/db");
+        fs::create_dir_all(&pkg).unwrap();
+        let target = pkg.join("db.go");
+        fs::write(&target, "package db").unwrap();
+        let entry = dir.path().join("main.go");
+        fs::write(&entry, "package main").unwrap();
+
+        let resolved =
+            LanguageKind::Go.resolve_source_specifier("example.com/app/internal/db", &entry, None);
+        assert_eq!(resolved, Some(target));
+    }
+
+    #[test]
     fn ts_backend_uses_ts_path_alias_resolution() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
@@ -560,6 +617,7 @@ mod tests {
         assert_eq!(LanguageKind::Ts.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Sql.symbol_ref_label(), "refs");
         assert_eq!(LanguageKind::Py.symbol_ref_label(), "calls");
+        assert_eq!(LanguageKind::Go.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Php.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Rs.symbol_ref_label(), "calls");
         assert_eq!(LanguageKind::Svelte.symbol_ref_label(), "calls");
@@ -575,6 +633,8 @@ mod tests {
         assert!(!LanguageKind::Sql.supports_lsp());
         assert!(!LanguageKind::Py.supports_trace());
         assert!(!LanguageKind::Py.supports_lsp());
+        assert!(LanguageKind::Go.supports_trace());
+        assert!(LanguageKind::Go.supports_lsp());
         assert!(!LanguageKind::Php.supports_trace());
         assert!(!LanguageKind::Php.supports_lsp());
         assert!(!LanguageKind::Rs.supports_trace());

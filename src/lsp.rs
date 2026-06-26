@@ -255,6 +255,7 @@ impl Drop for LspClient {
 
 fn server_command(language_kind: LanguageKind) -> (&'static str, &'static [&'static str]) {
     match language_kind {
+        LanguageKind::Go => ("gopls", &["serve"][..]),
         LanguageKind::Svelte => ("svelte-language-server", &["--stdio"]),
         LanguageKind::Ts
         | LanguageKind::Sql
@@ -275,6 +276,7 @@ fn language_id(path: &Path) -> &'static str {
         Some("svelte") => "svelte",
         Some("vue") => "vue",
         Some("php") => "php",
+        Some("go") => "go",
         _ => "javascript",
     }
 }
@@ -323,14 +325,16 @@ mod tests {
         assert_eq!(language_id(Path::new("a.svelte")), "svelte");
         assert_eq!(language_id(Path::new("a.vue")), "vue");
         assert_eq!(language_id(Path::new("a.php")), "php");
+        assert_eq!(language_id(Path::new("a.go")), "go");
     }
 
     #[test]
-    fn server_command_uses_svelte_language_server_for_svelte() {
+    fn server_command_uses_language_specific_servers() {
         assert_eq!(
             server_command(LanguageKind::Svelte),
             ("svelte-language-server", &["--stdio"][..])
         );
+        assert_eq!(server_command(LanguageKind::Go), ("gopls", &["serve"][..]));
         assert_eq!(
             server_command(LanguageKind::Ts),
             ("typescript-language-server", &["--stdio"][..])

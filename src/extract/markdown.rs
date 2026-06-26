@@ -326,9 +326,7 @@ fn cleaned_local_target(target: &str) -> Option<String> {
     }
 
     let trimmed = target.trim();
-    let cutoff = trimmed
-        .find(['#', '?'])
-        .unwrap_or(trimmed.len());
+    let cutoff = trimmed.find(['#', '?']).unwrap_or(trimmed.len());
     let cleaned = trimmed[..cutoff].trim();
     if cleaned.is_empty() {
         None
@@ -398,7 +396,10 @@ mod tests {
         assert_eq!(document.headings[0].title, "Root");
         assert_eq!(document.headings[0].children.len(), 2);
         assert_eq!(document.headings[0].children[0].title, "Child");
-        assert_eq!(document.headings[0].children[0].children[0].title, "Grandchild");
+        assert_eq!(
+            document.headings[0].children[0].children[0].title,
+            "Grandchild"
+        );
         assert_eq!(document.headings[0].children[1].title, "Peer");
     }
 

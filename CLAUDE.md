@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TS/JS, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. ~10x compression.
+Structural code and docs digest for TS/JS, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. ~10x compression.
 
 ## Build & Verify
 
@@ -28,13 +28,14 @@ xray --no-follow <file>          # plain: single file digest only
 | File | Role |
 |------|------|
 | `main.rs` | CLI arg parsing (Mode enum) + dispatch |
-| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Php/Rs/Svelte/Vue/Md): central dispatch for extraction, resolution, capabilities |
+| `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Go/Php/Rs/Svelte/Vue/Md): central dispatch for extraction, resolution, capabilities |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
-| `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server` integration |
-| `reverse.rs` | `--who`: project scanning, find importers (TS + Python + PHP + Rust + SQL + Markdown links) |
-| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::py`, `resolve::php`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
+| `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server`, `gopls`, and `svelte-language-server` integration |
+| `reverse.rs` | `--who`: project scanning, find importers (TS + Go + Python + PHP + Rust + SQL + Markdown links) |
+| `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::go`, `resolve::py`, `resolve::php`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
 | `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
+| `resolve/go.rs` | Go import resolution: `go.mod` module paths + relative package imports |
 | `resolve/py.rs` | Python import resolution: relative (`.`/`..`) + local project modules/packages |
 | `resolve/php.rs` | PHP import resolution: relative include paths + basic namespace-to-path lookup |
 | `resolve/rs.rs` | Rust module resolution: `mod`, `crate::`, `super::`, `self::` paths |
@@ -45,6 +46,7 @@ xray --no-follow <file>          # plain: single file digest only
 | `model.rs` | Symbol, JsxNode, TypeDef, Hook, MarkdownDocument, FileSummary, FileContent, FileSymbols, SymbolRefsLabel |
 | `extract/mod.rs` | Backend entrypoints: TS/Python/Rust/SQL/Markdown extraction + integration tests |
 | `extract/markdown.rs` | Markdown extraction (headings, links, frontmatter, fenced code blocks) |
+| `extract/go.rs` | Go extraction (imports, funcs/methods, vars/consts, structs/interfaces/types, tests, calls) |
 | `extract/python.rs` | Python extraction (imports, public/internal funcs, classes/dataclasses, calls, `__all__`) |
 | `extract/php.rs` | PHP extraction (`use`, include/require, funcs, classes/interfaces/traits/enums, calls) |
 | `extract/rust.rs` | Rust extraction (use/mod, pub/private fns, structs/enums/traits/impls, derives, tests, calls) |

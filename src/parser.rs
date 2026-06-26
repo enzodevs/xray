@@ -42,6 +42,7 @@ pub fn parse_file(path: &Path) -> Result<ParsedFile, XrayError> {
         LanguageKind::Ts
         | LanguageKind::Sql
         | LanguageKind::Py
+        | LanguageKind::Go
         | LanguageKind::Php
         | LanguageKind::Rs
         | LanguageKind::Svelte

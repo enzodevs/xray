@@ -367,7 +367,10 @@ mod tests {
 
         assert_eq!(tree.children.len(), 1);
         assert!(tree.summary.display_path.ends_with("README.md"));
-        assert!(tree.children[0].summary.display_path.ends_with("docs/guide.md"));
+        assert!(tree.children[0]
+            .summary
+            .display_path
+            .ends_with("docs/guide.md"));
         assert_eq!(tree.children[0].children.len(), 1);
         assert!(tree.children[0].children[0]
             .summary

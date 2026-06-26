@@ -26,7 +26,9 @@ fn collect_top_level(root: Node, src: &[u8], symbols: &mut FileSymbols) {
                     symbols.exports.push(symbol);
                 }
             }
-            "class_declaration" | "interface_declaration" | "trait_declaration"
+            "class_declaration"
+            | "interface_declaration"
+            | "trait_declaration"
             | "enum_declaration" => {
                 if let Some(ty) = extract_type(node, src) {
                     symbols.types.push(ty);
@@ -50,7 +52,9 @@ fn collect_namespace(node: Node, src: &[u8], symbols: &mut FileSymbols) {
                     symbols.exports.push(symbol);
                 }
             }
-            "class_declaration" | "interface_declaration" | "trait_declaration"
+            "class_declaration"
+            | "interface_declaration"
+            | "trait_declaration"
             | "enum_declaration" => {
                 if let Some(ty) = extract_type(child, src) {
                     symbols.types.push(ty);
@@ -102,12 +106,7 @@ fn extract_namespace_use(node: Node, src: &[u8], symbols: &mut FileSymbols) {
     }
 }
 
-fn extract_namespace_use_clause(
-    node: Node,
-    src: &[u8],
-    prefix: &str,
-    symbols: &mut FileSymbols,
-) {
+fn extract_namespace_use_clause(node: Node, src: &[u8], prefix: &str, symbols: &mut FileSymbols) {
     let mut source = String::new();
     let mut alias = None;
     let mut cursor = node.walk();
@@ -250,7 +249,9 @@ fn call_name(node: Node, src: &[u8]) -> Option<String> {
         "include_expression"
         | "include_once_expression"
         | "require_expression"
-        | "require_once_expression" => Some(node.kind().trim_end_matches("_expression").to_string()),
+        | "require_once_expression" => {
+            Some(node.kind().trim_end_matches("_expression").to_string())
+        }
         _ => None,
     }
 }
@@ -378,7 +379,9 @@ fn literal_child_text(node: Node, src: &[u8]) -> Option<String> {
 
 fn first_named_child_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
-    let found = node.children(&mut cursor).find(|child| child.kind() == kind);
+    let found = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == kind);
     found
 }
 
@@ -468,7 +471,10 @@ mod tests {
         let tree = parse_php(src);
         let symbols = extract_symbols(tree.root_node(), src);
 
-        assert_eq!(symbols.imports, vec!["App\\Services\\UserService".to_string()]);
+        assert_eq!(
+            symbols.imports,
+            vec!["App\\Services\\UserService".to_string()]
+        );
         assert_eq!(symbols.import_bindings[0].local_name, "Users");
         assert_eq!(symbols.exports.len(), 2);
         assert_eq!(symbols.exports[0].signature, "const LIMIT");

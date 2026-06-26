@@ -303,13 +303,7 @@ impl fmt::Display for Indented<'_, MarkdownLink> {
             write!(
                 f,
                 "{}{} {}: {}  {:?}  [L{}-{}]",
-                indent,
-                scope,
-                kind,
-                link.target,
-                link.label,
-                link.line_start,
-                link.line_end
+                indent, scope, kind, link.target, link.label, link.line_start, link.line_end
             )
         }
     }

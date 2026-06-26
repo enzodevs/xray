@@ -1,3 +1,4 @@
+mod go;
 mod markdown;
 mod php;
 mod py;
@@ -18,6 +19,7 @@ pub struct PathConfig {
     aliases: Vec<(String, Vec<String>)>,
 }
 
+pub(crate) use go::resolve_go_import;
 pub(crate) use markdown::resolve_markdown_link;
 pub(crate) use php::resolve_php_import;
 pub(crate) use py::resolve_py_import;
