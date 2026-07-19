@@ -8,8 +8,30 @@ pub(super) fn try_extensions_with(base: &Path, exts: &[&str]) -> Option<PathBuf>
         }
     }
 
+    // Substitute explicit ecosystem extensions before appending another one.
+    // TypeScript projects commonly emit `./user.js` imports that resolve back
+    // to `./user.ts`; checking appended names first could incorrectly prefer
+    // an unrelated `user.js.ts` file.
+    if base
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| exts.contains(&ext))
+    {
+        for ext in exts {
+            let candidate = base.with_extension(ext);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
     for ext in exts {
-        let candidate = base.with_extension(ext);
+        // Append rather than replace: `./user.service` must resolve to
+        // `./user.service.ts`, not `./user.ts`.
+        let mut candidate = base.as_os_str().to_os_string();
+        candidate.push(".");
+        candidate.push(ext);
+        let candidate = PathBuf::from(candidate);
         if candidate.is_file() {
             return Some(candidate);
         }

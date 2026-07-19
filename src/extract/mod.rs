@@ -186,7 +186,57 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
         }
     }
 
+    extract_nested_functions(root, src, &mut symbols.internals);
     symbols
+}
+
+/// Promote named functions declared inside another function or method to
+/// traceable internals. They remain listed as handlers on React components,
+/// but can now also be selected directly with `--trace -s NAME`.
+fn extract_nested_functions(root: Node, src: &[u8], internals: &mut Vec<Symbol>) {
+    fn walk(node: Node, src: &[u8], internals: &mut Vec<Symbol>) {
+        if has_function_ancestor(node) {
+            let symbol = match node.kind() {
+                "function_declaration" => extract_function(node, src),
+                "variable_declarator"
+                    if node
+                        .child_by_field_name("value")
+                        .is_some_and(|value| value.kind() == "arrow_function") =>
+                {
+                    extract_arrow(node, src)
+                }
+                _ => None,
+            };
+            if let Some(symbol) = symbol {
+                internals.push(symbol);
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk(child, src, internals);
+        }
+    }
+
+    fn has_function_ancestor(node: Node) -> bool {
+        let mut parent = node.parent();
+        while let Some(current) = parent {
+            if matches!(
+                current.kind(),
+                "arrow_function"
+                    | "function"
+                    | "function_declaration"
+                    | "function_expression"
+                    | "method_definition"
+            ) {
+                return true;
+            }
+            parent = current.parent();
+        }
+        false
+    }
+
+    walk(root, src, internals);
 }
 
 // ── Imports ──
@@ -1602,7 +1652,7 @@ describe('suite', () => {
     #[test]
     fn component_extracts_arrow_handler() {
         let src = br"function App() {
-  const handleHover = () => { console.log('hover'); };
+  const handleHover = () => { service.recordHover(); };
   return <div onMouseOver={handleHover} />;
 }";
         let tree = parse_tsx(src);
@@ -1613,6 +1663,12 @@ describe('suite', () => {
             vec!["handleHover"],
             "should extract arrow function handler"
         );
+        let handler = symbols
+            .internals
+            .iter()
+            .find(|symbol| symbol.name() == "handleHover")
+            .expect("named local handler should be independently traceable");
+        assert_eq!(handler.calls, vec!["service.recordHover"]);
     }
 
     #[test]
@@ -1760,24 +1816,24 @@ describe('suite', () => {
                 name: "Layout".into(),
                 children: vec![
                     JsxNode {
+                        name: "Header".into(),
+                        children: vec![]
+                    },
+                    JsxNode {
                         name: "Content".into(),
                         children: vec![JsxNode {
                             name: "List".into(),
                             children: vec![]
                         }],
                     },
-                    JsxNode {
-                        name: "Header".into(),
-                        children: vec![]
-                    },
                 ],
             }],
-            "should preserve hierarchy with sorted children"
+            "should preserve hierarchy and source order"
         );
     }
 
     #[test]
-    fn jsx_tree_dedup_siblings() {
+    fn jsx_tree_preserves_repeated_siblings() {
         let src = b"function App() { return <div><Icon /><Icon /><Badge /></div>; }";
         let tree = parse_tsx(src);
         let symbols = extract_symbols(tree.root_node(), src);
@@ -1786,15 +1842,19 @@ describe('suite', () => {
             symbols.internals[0].renders,
             vec![
                 JsxNode {
-                    name: "Badge".into(),
+                    name: "Icon".into(),
                     children: vec![]
                 },
                 JsxNode {
                     name: "Icon".into(),
                     children: vec![]
                 },
+                JsxNode {
+                    name: "Badge".into(),
+                    children: vec![]
+                },
             ],
-            "duplicate siblings should be merged and sorted"
+            "repeated siblings and source order are structurally significant"
         );
     }
 

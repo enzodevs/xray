@@ -1,0 +1,11 @@
+[index]
+# Whitelist hand-written source and project context. Tests are embedded in src/.
+ignore = [
+  "*",
+  "!AGENTS.md",
+  "!CLAUDE.md",
+  "!README.md",
+  "!Cargo.toml",
+  "!docs/",
+  "!src/"
+]

@@ -21,6 +21,7 @@ pub struct TraceConfig {
 #[derive(Debug, PartialEq)]
 enum UnresolvedReason {
     MemberCall,
+    AmbiguousLocal,
     External,
     UnresolvedImport(String),
     FileNotFound,
@@ -32,6 +33,7 @@ impl std::fmt::Display for UnresolvedReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MemberCall => f.write_str("member call"),
+            Self::AmbiguousLocal => f.write_str("ambiguous local symbol"),
             Self::External => f.write_str("external"),
             Self::UnresolvedImport(src) => write!(f, "unresolved import: {src}"),
             Self::FileNotFound => f.write_str("file not found"),
@@ -213,20 +215,32 @@ fn select_symbols<'a>(symbols: &'a FileSymbols, target: Option<&str>) -> Vec<&'a
 fn resolve_call(
     call_name: &str,
     symbols: &FileSymbols,
+    caller_lines: (usize, usize),
     file_path: &Path,
     path_config: Option<&PathConfig>,
     language_kind: LanguageKind,
 ) -> CallTarget {
-    // 1. Local symbol in same file (exports + internals)
-    for sym in symbols.exports.iter().chain(symbols.internals.iter()) {
-        let sym_name = output::extract_name_from_signature(&sym.signature);
-        if sym_name == call_name {
+    // Imported files in a monorepo can belong to a different package and
+    // therefore a different nearest tsconfig than the entry file.
+    let local_path_config = file_path.parent().and_then(resolve::load_path_config);
+    let path_config = local_path_config.as_ref().or(path_config);
+
+    // 1. Local symbol in the same file. Prefer the nearest lexical owner
+    // inferred from symbol ranges; never silently choose the first duplicate.
+    match find_local_symbol(symbols, call_name, caller_lines) {
+        Ok(Some(sym)) => {
             return CallTarget::Local {
                 line_start: sym.line_start,
                 line_end: sym.line_end,
                 calls: sym.calls.clone(),
             };
         }
+        Err(()) => {
+            return CallTarget::Unresolved {
+                reason: UnresolvedReason::AmbiguousLocal,
+            };
+        }
+        Ok(None) => {}
     }
 
     // 2. Imported binding
@@ -253,15 +267,20 @@ fn resolve_call(
     // 3. this.method → strip prefix and resolve locally
     if let Some(method) = call_name.strip_prefix("this.") {
         if !method.contains('.') {
-            for sym in symbols.exports.iter().chain(symbols.internals.iter()) {
-                let sym_name = output::extract_name_from_signature(&sym.signature);
-                if sym_name == method {
+            match find_local_symbol(symbols, method, caller_lines) {
+                Ok(Some(sym)) => {
                     return CallTarget::Local {
                         line_start: sym.line_start,
                         line_end: sym.line_end,
                         calls: sym.calls.clone(),
                     };
                 }
+                Err(()) => {
+                    return CallTarget::Unresolved {
+                        reason: UnresolvedReason::AmbiguousLocal,
+                    };
+                }
+                Ok(None) => {}
             }
         }
     }
@@ -277,6 +296,56 @@ fn resolve_call(
     CallTarget::Unresolved {
         reason: UnresolvedReason::External,
     }
+}
+
+/// Find a local symbol without crossing lexical owners. Symbol spans give us
+/// named scopes; if an anonymous scope still leaves duplicates, report
+/// ambiguity instead of tracing an arbitrary implementation.
+fn find_local_symbol<'a>(
+    symbols: &'a FileSymbols,
+    name: &str,
+    caller_lines: (usize, usize),
+) -> Result<Option<&'a Symbol>, ()> {
+    let all_symbols: Vec<&Symbol> = symbols
+        .exports
+        .iter()
+        .chain(symbols.internals.iter())
+        .collect();
+    let candidates: Vec<&Symbol> = all_symbols
+        .iter()
+        .copied()
+        .filter(|sym| output::extract_name_from_signature(&sym.signature) == name)
+        .collect();
+
+    if candidates.len() <= 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    let mut scopes = vec![caller_lines];
+    let mut enclosing: Vec<(usize, usize)> = all_symbols
+        .iter()
+        .filter_map(|sym| {
+            let span = (sym.line_start, sym.line_end);
+            (span != caller_lines && span.0 <= caller_lines.0 && span.1 >= caller_lines.1)
+                .then_some(span)
+        })
+        .collect();
+    enclosing.sort_by_key(|span| span.1.saturating_sub(span.0));
+    enclosing.dedup();
+    scopes.extend(enclosing);
+
+    for scope in scopes {
+        let visible: Vec<&Symbol> = candidates
+            .iter()
+            .copied()
+            .filter(|sym| sym.line_start >= scope.0 && sym.line_end <= scope.1)
+            .collect();
+        if visible.len() == 1 {
+            return Ok(visible.into_iter().next());
+        }
+    }
+
+    Err(())
 }
 
 /// Find a matching export symbol in a file's symbols.
@@ -308,7 +377,14 @@ fn build_call_tree(
 ) -> Vec<CallNode> {
     let mut nodes = Vec::with_capacity(calls.len());
     for call_name in calls {
-        let target = resolve_call(call_name, symbols, file_path, path_config, language_kind);
+        let target = resolve_call(
+            call_name,
+            symbols,
+            caller_lines,
+            file_path,
+            path_config,
+            language_kind,
+        );
         let node = match target {
             CallTarget::Local {
                 line_start,
@@ -893,6 +969,7 @@ mod tests {
         let target = resolve_call(
             "helper",
             &symbols,
+            (1, 10),
             Path::new("/a.ts"),
             None,
             LanguageKind::Ts,
@@ -908,6 +985,7 @@ mod tests {
         let target = resolve_call(
             "helper",
             &symbols,
+            (1, 10),
             Path::new("/a.ts"),
             None,
             LanguageKind::Ts,
@@ -923,6 +1001,7 @@ mod tests {
         let target = resolve_call(
             "this.doWork",
             &symbols,
+            (1, 10),
             Path::new("/a.ts"),
             None,
             LanguageKind::Ts,
@@ -936,6 +1015,7 @@ mod tests {
         let target = resolve_call(
             "this.missing",
             &symbols,
+            (1, 10),
             Path::new("/a.ts"),
             None,
             LanguageKind::Ts,
@@ -952,6 +1032,7 @@ mod tests {
         let target = resolve_call(
             "this.service.method",
             &symbols,
+            (1, 10),
             Path::new("/a.ts"),
             None,
             LanguageKind::Ts,
@@ -968,6 +1049,7 @@ mod tests {
         let target = resolve_call(
             "obj.method",
             &symbols,
+            (1, 10),
             Path::new("/a.ts"),
             None,
             LanguageKind::Ts,
@@ -984,6 +1066,7 @@ mod tests {
         let target = resolve_call(
             "unknownFn",
             &symbols,
+            (1, 10),
             Path::new("/a.ts"),
             None,
             LanguageKind::Ts,
@@ -1006,6 +1089,7 @@ mod tests {
         let target = resolve_call(
             "fetchData",
             &symbols,
+            (1, 10),
             Path::new("/src/a.ts"),
             None,
             LanguageKind::Ts,
@@ -1013,6 +1097,69 @@ mod tests {
         assert!(matches!(
             target,
             CallTarget::Imported { .. } | CallTarget::Unresolved { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_call_prefers_duplicate_in_callers_lexical_owner() {
+        let mut symbols = empty_symbols();
+        symbols
+            .exports
+            .push(make_symbol_at("FirstComponent", 1, 50));
+        symbols
+            .exports
+            .push(make_symbol_at("SecondComponent", 60, 110));
+        symbols
+            .internals
+            .push(make_symbol_at("handlePointerDown", 10, 20));
+        symbols
+            .internals
+            .push(make_symbol_at("handlePointerDown", 70, 80));
+
+        let target = resolve_call(
+            "handlePointerDown",
+            &symbols,
+            (60, 110),
+            Path::new("/a.tsx"),
+            None,
+            LanguageKind::Ts,
+        );
+
+        assert!(matches!(
+            target,
+            CallTarget::Local {
+                line_start: 70,
+                line_end: 80,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolve_call_reports_duplicates_in_same_owner_as_ambiguous() {
+        let mut symbols = empty_symbols();
+        symbols.exports.push(make_symbol_at("Component", 1, 100));
+        symbols
+            .internals
+            .push(make_symbol_at("handleKeyDown", 10, 20));
+        symbols
+            .internals
+            .push(make_symbol_at("handleKeyDown", 30, 40));
+
+        let target = resolve_call(
+            "handleKeyDown",
+            &symbols,
+            (1, 100),
+            Path::new("/a.tsx"),
+            None,
+            LanguageKind::Ts,
+        );
+
+        assert!(matches!(
+            target,
+            CallTarget::Unresolved {
+                reason: UnresolvedReason::AmbiguousLocal
+            }
         ));
     }
 

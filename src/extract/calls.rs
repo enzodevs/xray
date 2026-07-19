@@ -7,15 +7,17 @@ pub(super) fn extract_calls(body: Option<Node>, src: &[u8]) -> Vec<String> {
     if let Some(body) = body {
         walk_calls(body, src, &mut calls);
     }
-    calls.sort();
-    calls.dedup();
-    calls.truncate(10);
-    calls
+    dedup_preserving_order(calls)
 }
 
 fn walk_calls(node: Node, src: &[u8], calls: &mut Vec<String>) {
     if node.kind() == "call_expression" {
-        if let Some(func) = node.child_by_field_name("function") {
+        let function = node.child_by_field_name("function");
+        if let Some(func) = function {
+            // Chained calls evaluate their inner callee first:
+            // `implement(route).handler(cb)` is `implement`, then `handler`.
+            walk_calls(func, src, calls);
+
             let name = match func.kind() {
                 "identifier" => {
                     let n = txt(func, src);
@@ -32,13 +34,20 @@ fn walk_calls(node: Node, src: &[u8], calls: &mut Vec<String>) {
                 calls.push(name);
             }
         }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if function != Some(child) {
+                walk_calls(child, src, calls);
+            }
+        }
+        return;
     }
 
-    // Don't descend into nested function definitions
-    if matches!(
-        node.kind(),
-        "arrow_function" | "function" | "function_declaration"
-    ) {
+    // Inline callbacks are part of the enclosing call's behavior. Locally
+    // declared functions are separate trace targets and must not leak calls
+    // into their parent symbol.
+    if is_function(node) && !is_inline_callback(node) {
         return;
     }
 
@@ -46,6 +55,28 @@ fn walk_calls(node: Node, src: &[u8], calls: &mut Vec<String>) {
     for child in node.children(&mut cursor) {
         walk_calls(child, src, calls);
     }
+}
+
+fn is_function(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "arrow_function" | "function" | "function_declaration" | "function_expression"
+    )
+}
+
+fn is_inline_callback(node: Node) -> bool {
+    node.parent()
+        .is_some_and(|parent| parent.kind() == "arguments")
+}
+
+fn dedup_preserving_order(calls: Vec<String>) -> Vec<String> {
+    let mut unique = Vec::with_capacity(calls.len());
+    for call in calls {
+        if !unique.contains(&call) {
+            unique.push(call);
+        }
+    }
+    unique
 }
 
 fn extract_member_call(func: Node, src: &[u8]) -> String {
@@ -74,5 +105,61 @@ fn extract_member_call(func: Node, src: &[u8]) -> String {
         String::new()
     } else {
         full
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract(src: &[u8]) -> Vec<String> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        extract_calls(Some(tree.root_node()), src)
+    }
+
+    #[test]
+    fn includes_calls_inside_inline_callbacks() {
+        let calls = extract(
+            b"implement(route).handler(async () => {
+                currentProfile();
+                service.recommendForProfessor();
+            });",
+        );
+
+        assert_eq!(
+            calls,
+            [
+                "implement",
+                "\u{2026}.handler",
+                "currentProfile",
+                "service.recommendForProfessor"
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_calls_inside_locally_declared_functions() {
+        let calls = extract(
+            b"outer();
+              function local() { hidden(); }
+              const handler = () => concealed();",
+        );
+
+        assert_eq!(calls, ["outer"]);
+    }
+
+    #[test]
+    fn retains_all_calls_in_source_order() {
+        let src = b"a(); b(); c(); d(); e(); f(); g(); h(); i(); j(); k(); l(); a();";
+        let calls = extract(src);
+
+        assert_eq!(
+            calls,
+            ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+        );
     }
 }

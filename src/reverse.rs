@@ -107,12 +107,21 @@ fn find_importers(
         };
 
         // Strategy 1: file-level include directives (\i, SOURCE, @@)
-        let sources = parsed.dependency_specifiers();
+        // Include bare TS imports because a workspace path alias can look
+        // exactly like an external package (for example `@workspace/ui`).
+        let sources = parsed.diagnostic_specifiers();
+        // Resolve each importer with its own nearest config. Reusing the
+        // target package's config breaks aliases across monorepo workspaces.
+        let local_path_config = file_path.parent().and_then(resolve::load_path_config);
+        let effective_path_config = local_path_config.as_ref().or(path_config);
 
         for specifier in &sources {
-            let Some(resolved) =
-                resolve_source_specifier(parsed.language_kind, specifier, file_path, path_config)
-            else {
+            let Some(resolved) = resolve_source_specifier(
+                parsed.language_kind,
+                specifier,
+                file_path,
+                effective_path_config,
+            ) else {
                 continue;
             };
 
@@ -320,6 +329,36 @@ mod tests {
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("main.ts"));
         assert_eq!(importers[0].1, 2);
+    }
+
+    #[test]
+    fn find_importers_uses_each_workspaces_nearest_tsconfig() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_src = dir.path().join("packages/ui/src");
+        let app = dir.path().join("apps/web");
+        fs::create_dir_all(&package_src).unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "paths": { "@ui/*": ["../../packages/ui/src/*"] }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let target = package_src.join("button.ts");
+        fs::write(&target, "export const Button = 1;").unwrap();
+        fs::write(
+            app.join("page.ts"),
+            "import { Button } from '@ui/button';\nexport { Button };",
+        )
+        .unwrap();
+
+        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]);
+        assert_eq!(importers.len(), 1);
+        assert!(importers[0].0.ends_with("apps/web/page.ts"));
     }
 
     #[test]

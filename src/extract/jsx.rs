@@ -88,10 +88,7 @@ pub(super) fn extract_jsx_components(body: Option<Node>, src: &[u8]) -> Vec<JsxN
     let Some(body) = body else {
         return Vec::new();
     };
-    let mut nodes = collect_jsx_tree(body, src);
-    dedup_jsx_nodes(&mut nodes);
-    truncate_siblings(&mut nodes, 8);
-    nodes
+    collect_jsx_tree(body, src)
 }
 
 /// Recursive AST walk that builds the JSX hierarchy.
@@ -156,33 +153,4 @@ fn collect_children(node: Node, src: &[u8]) -> Vec<JsxNode> {
         result.extend(collect_jsx_tree(child, src));
     }
     result
-}
-
-/// Sort, deduplicate (merging children), and recurse at each level.
-fn dedup_jsx_nodes(nodes: &mut Vec<JsxNode>) {
-    nodes.sort_by(|a, b| a.name.cmp(&b.name));
-
-    // Merge nodes with the same name: combine children
-    let mut i = 0;
-    while i + 1 < nodes.len() {
-        if nodes[i].name == nodes[i + 1].name {
-            let removed = nodes.remove(i + 1);
-            nodes[i].children.extend(removed.children);
-        } else {
-            i += 1;
-        }
-    }
-
-    // Recurse into children
-    for node in nodes.iter_mut() {
-        dedup_jsx_nodes(&mut node.children);
-    }
-}
-
-/// Limit sibling count at each level (recursively).
-fn truncate_siblings(nodes: &mut Vec<JsxNode>, max: usize) {
-    nodes.truncate(max);
-    for node in nodes.iter_mut() {
-        truncate_siblings(&mut node.children, max);
-    }
 }

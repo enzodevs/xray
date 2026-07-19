@@ -2,6 +2,13 @@
 
 See `CLAUDE.md` for architecture, conventions, and tree-sitter gotchas.
 
+## Code navigation
+
+The repository is indexed in cc2 as project `xray`. Use semantic search with
+`cc2 search 'QUERY' -p xray --intent <intent>` and refresh the index with
+`cc2 index . -id xray` after substantial source changes. The checked-in `.cc2`
+and `.cc2config` files keep indexing scoped to hand-written source and docs.
+
 ## Build & Verify
 
 ```sh

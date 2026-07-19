@@ -1,0 +1,14 @@
+{
+  "scopes": {
+    "default": {
+      "directories": ["src", "docs"]
+    },
+    "source": {
+      "directories": ["src"]
+    },
+    "docs": {
+      "directories": ["docs"]
+    },
+    "full": {}
+  }
+}

@@ -327,6 +327,31 @@ mod tests {
     }
 
     #[test]
+    fn try_extensions_appends_to_dotted_module_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("user.service.ts");
+        fs::write(&file, "export class UserService {}").unwrap();
+
+        let result = try_extensions(&dir.path().join("user.service"));
+        assert_eq!(result, Some(file));
+    }
+
+    #[test]
+    fn try_extensions_substitutes_explicit_extension_before_appending() {
+        let dir = tempfile::tempdir().unwrap();
+        let emitted_source = dir.path().join("user.ts");
+        fs::write(&emitted_source, "export const source = true;").unwrap();
+        fs::write(
+            dir.path().join("user.js.ts"),
+            "export const unrelated = true;",
+        )
+        .unwrap();
+
+        let result = try_extensions(&dir.path().join("user.js"));
+        assert_eq!(result, Some(emitted_source));
+    }
+
+    #[test]
     fn try_extensions_finds_index_file() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("components");
