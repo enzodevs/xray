@@ -1,328 +1,236 @@
-# xray
+<h1 align="center">xray</h1>
 
-Structural code and docs digest for TypeScript/JavaScript, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. Compresses source to ~10% of its size, showing only what matters: **signatures, types, exports, imports, hooks, render trees, refs, headings, links, code fences, and line ranges**.
+<p align="center"><strong>See the shape of a codebase before you read the code.</strong></p>
 
-Built for LLM context windows — feed xray output instead of raw source to save tokens while preserving structural understanding.
+<p align="center">
+  xray turns source files into compact, syntax-aware maps of symbols, dependencies, call paths, hooks, render trees, types, and line ranges.
+</p>
+
+<p align="center">
+  <a href="https://github.com/enzodevs/xray/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-5c6ac4.svg">
+  <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-b7410e.svg">
+</p>
+
+---
+
+Reading a large file just to find its exports, hooks, or callers wastes context. xray keeps the useful structure and leaves function bodies behind. Its output is often around 10% of the original source, with line numbers so you can jump straight to the code that matters.
+
+It is built for coding agents, but the output is plain text and works just as well in a terminal.
+
+## What xray gives you
+
+- **A file map:** imports, exports, internal symbols, types, hooks, calls, tests, and line ranges.
+- **Local dependency trees:** follow imports without opening every file.
+- **Cross-file call traces:** start from one handler or method and follow the path through the project.
+- **Reverse dependencies:** find files that import the target before changing it.
+- **Frontend structure:** React hooks and JSX trees, plus Vue and Svelte component structure.
+- **Machine-readable output:** emit a single-file digest as JSON for scripts and agent tooling.
+
+xray parses syntax rather than matching text. It understands TypeScript/JavaScript, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown.
+
+## See it in action
+
+Trace one method from a 47-line NestJS controller into its services, evidence loaders, and prompt builders:
+
+```sh
+xray --trace --lsp -s getProfessorRecommendations \
+  apps/api/src/uniai/uniai.controller.ts
+```
+
+```text
+trace: getProfessorRecommendations  [L17-24]
+│
+├── this.currentProfile  (local)  [L36-46]
+│   ├── extractAuthIdentity  ←  apps/api/src/shared/auth-context.ts  [L46-82]
+│   ├── unauthenticated  ←  apps/api/src/shared/errors.ts  [L213-215]
+│   └── this.profilesService.syncAuthProfile
+│       ←  apps/api/src/profiles/profiles.service.ts  [L86-117]
+└── this.uniaiService.recommendForProfessor
+    ←  apps/api/src/uniai/uniai.service.ts  [L20-30]
+    ├── this.evidenceTools.loadProfessorEvidence
+    │   ←  apps/api/src/uniai/uniai-evidence-tools.ts  [L78-103]
+    └── composeProfessorRecommendation
+        ←  apps/api/src/uniai/uniai-prompts.ts  [L302-328]
+```
+
+The trace is static and bounded. Local calls resolve directly; `--lsp` adds language-server definitions for member calls such as `this.service.run()`.
 
 ## Install
 
+xray currently installs from source:
+
 ```sh
-# From source
+git clone https://github.com/enzodevs/xray.git
+cd xray
 cargo install --path .
+```
 
-# Or build manually
+Make sure Cargo's bin directory is on your `PATH`:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+To build without installing:
+
+```sh
 cargo build --release
-cp target/release/xray ~/.local/bin/
+./target/release/xray --help
 ```
 
-Requires Rust 1.70+.
+A recent stable Rust toolchain is required.
 
-## Usage
-
-```
-xray <file> [file2 ...]          # follow mode (default): tree with depth 1 + noise filter
-xray --depth 2 <file>            # follow with deeper recursion
-xray --all <file>                # follow without noise filter
-xray --no-follow <file>          # single file digest only
-xray --who <file>                # show files that import the target
-xray --trace <file>              # trace cross-file call chains from exports
-xray --trace --lsp <file>        # trace with LSP-resolved member calls
-xray --trace -s <name> <file>    # trace a specific symbol
-```
-
-### React component (TSX)
-
-Given a 80-line React component file:
+## Quick start
 
 ```sh
-$ xray components/UserList.tsx
+# Map one file without following imports
+xray --no-follow src/app.ts
+
+# Map the file and its direct local dependencies
+xray src/app.ts
+
+# Follow two levels deep
+xray --depth 2 src/app.ts
+
+# Trace all exported entry points
+xray --trace src/app.ts
+
+# Trace one symbol and resolve member calls through the language server
+xray --trace --lsp -s createUser src/routes/users.ts
+
+# Find project files that import this file
+xray --who src/lib/auth.ts
+
+# Show resolution counts and unresolved imports
+xray --explain src/app.ts
+
+# Produce a JSON digest for another tool
+xray --no-follow --format json src/app.ts
 ```
 
-```
-components/UserList.tsx  (tsx, 80 lines)
+Run xray from the project or workspace root when you want import resolution, reverse lookup, or LSP tracing. This gives it the right `tsconfig.json`, `go.mod`, and workspace context.
 
-imports: @/lib/api, @/utils/date
+## Modes
 
-exports:
-  [component] const UserList = ({ initialUsers, onSelect }) =>  [L20-55]
-    hooks:
-      useState: users, setUsers  [L21-21]
-      useState: search, setSearch  [L22-22]
-      useState: sortOrder, setSortOrder  [L23-23]
-      useEffect  deps: [search]  [L25-27]
-      useCallback: handleSort  deps: []  [L29-31]
-    calls: filteredUsers.map, users.filter, ….sort
-    renders: SearchBar, SortButton
-  function useUserSearch(initialQuery = '')  [L67-80]
-    calls: useEffect, useState
+| Goal | Command | What it does |
+|---|---|---|
+| Understand one file | `xray --no-follow FILE` | Prints one structural digest with no dependency traversal |
+| Explore nearby code | `xray FILE` | Follows local imports to depth 1 and filters low-signal files |
+| Explore deeper | `xray --depth N FILE` | Sets the dependency or trace depth |
+| Keep every dependency | `xray --all FILE` | Disables the default noise filter |
+| Check impact | `xray --who FILE` | Finds project files that import the target |
+| Follow behavior | `xray --trace FILE` | Traces calls from exported symbols, to depth 3 by default |
+| Follow one entry point | `xray --trace -s NAME FILE` | Traces only the named symbol |
+| Resolve member calls | `xray --trace --lsp FILE` | Asks a supported language server for definitions |
+| Audit resolution | `xray --explain FILE` | Reports resolved, external, and unresolved dependencies |
+| Feed another tool | `xray --no-follow --format json FILE` | Emits a single-file JSON digest |
 
-internal:
-  [component] function UserCard({ user, onClick })  [L57-65]
-    calls: formatDate
-    renders: Avatar
-
-types:
-  interface UserProfile {id, name, email, avatar, createdAt}  [L5-11]
-  type SortOrder 'asc' | 'desc'  [L13-13]
-  interface UserListProps {initialUsers, onSelect}  [L15-18]
-```
-
-### Plain TypeScript
+You can pass more than one file to the regular text modes:
 
 ```sh
-$ xray lib/server.ts
-```
-
-```
-lib/server.ts  (ts, 36 lines)
-
-imports: ./database, ./logger
-
-exports:
-  async function startServer(config: Config)  [L12-18]
-    calls: app.listen, app.use, authMiddleware, corsMiddleware, createApp, logger.info
-  function createRouter(prefix: string)  [L20-25]
-    calls: router.get, router.post
-
-internal:
-  async function healthCheck(req: Request, res: Response)  [L27-30]
-    calls: db.ping, res.json
-  async function createUser(req: Request, res: Response)  [L32-36]
-    calls: db.users.create, logger.info, res.json
-
-types:
-  export interface Config {port, host, debug}  [L4-8]
-  export type Handler (req: Request, res: Response) => Promise<void>  [L10-10]
-```
-
-### Svelte
-
-```sh
-$ xray routes/UserCard.svelte
-```
-
-```
-routes/UserCard.svelte  (svelte, 42 lines)
-
-imports: ./Avatar.svelte, ./format
-
-exports:
-  [component] default component  [L1-42]
-    calls: avatarFor, visible
-    renders: Card > [Avatar, svelte:component]
-  prop user: User  [L5-5]
-
-internal:
-  const label = formatName(user.name)  [L8-8]
-    calls: formatName
-
-types:
-  type User {id, name, avatar}  [L3-3]
-```
-
-### Vue
-
-```sh
-$ xray components/AppShell.vue
-```
-
-```
-components/AppShell.vue  (vue, 24 lines)
-
-imports: @/components/ui/sidebar, @/types
-
-exports:
-  [component] default component  [L1-24]
-    calls: usePage
-    renders: SidebarProvider
-
-internal:
-  const props = defineProps(...)  [L7-7]
-  const isOpen = usePage(...)  [L12-12]
-
-types:
-  type Props {variant}  [L5-7]
-```
-
-### SQL
-
-```sh
-$ xray migrations/001_schema.sql
-```
-
-```
-migrations/001_schema.sql  (sql, 45 lines)
-
-includes: ./types.sql
-
-  CREATE TABLE users (id, name, email, created_at)  [L5-10]
-  CREATE INDEX idx_users_email  target: users  [L12-12]
-  CREATE FUNCTION get_active_users() RETURNS SETOF users  [L14-25]
-    refs: source: users
-  INSERT INTO roles (name)  target: roles  source: users  [L30-35]
-  SELECT … FROM orders JOIN users  source: orders  join: users  [L40-45]
-```
-
-### Markdown
-
-```sh
-$ xray README.md
-```
-
-```
-README.md  (md, 190 lines)
-
-headings:
-  H1 xray  [L1-1]
-  H2 Install  [L7-7]
-  H2 Usage  [L20-20]
-
-links:
-  external link: https://tree-sitter.github.io/  [L206-206]
-  local link: LICENSE  [L214-214]
-
-code fences:
-  sh  [L9-16]
-  text  [L22-30]
+xray src/api.ts src/worker.ts
 ```
 
 ## What it extracts
 
-### TypeScript / JavaScript
+| Language | File structure | Calls | Follow / who | Trace | LSP trace |
+|---|:---:|:---:|:---:|:---:|:---:|
+| TypeScript / JavaScript / JSX / TSX | ✓ | ✓ | ✓ | ✓ | `typescript-language-server` |
+| Go | ✓ | ✓ | ✓ | ✓ | `gopls` |
+| Vue | ✓ | ✓ | ✓ | ✓ | not required |
+| Svelte | ✓ | ✓ | ✓ | ✓ | `svelte-language-server` |
+| Python | ✓ | ✓ | ✓ | — | — |
+| PHP | ✓ | ✓ | ✓ | — | — |
+| Rust | ✓ | ✓ | ✓ | — | — |
+| SQL | ✓ | references | includes | — | — |
+| Markdown | ✓ | — | local links | — | — |
 
-| Section | Content |
-|---------|---------|
-| **imports** | Module sources (deduped, path aliases preserved) |
-| **re-exports** | `export { x } from './mod'` grouped by source |
-| **exports** | Exported functions/consts with signatures |
-| **internal** | Non-exported functions |
-| **hooks** | React hooks with bindings, deps arrays |
-| **types** | Interfaces, type aliases, enums with member summary |
-| **tests** | `describe`/`it`/`test` blocks with nesting |
+Supported extensions:
 
-Each function also shows:
-- **`[component]`** tag when it returns JSX
-- **hooks** — `useState: x, setX  deps: [y]`
-- **handlers** — local functions inside components
-- **calls** — significant function calls (noise filtered)
-- **renders** — JSX component tree: `Layout > [Sidebar, Content > List]`
-- **line ranges** — `[L10-25]` for jumping to source
+```text
+.ts .tsx .js .jsx .mjs .mts .cjs .go .vue .svelte
+.py .php .rs .sql .md
+```
 
-### Svelte
+### TypeScript and frontend files
 
-| Section | Content |
-|---------|---------|
-| **imports** | `<script>` module sources, including `.svelte` components |
-| **re-exports** | `<script>` re-exports grouped by source |
-| **exports** | The file's default component plus `export let`/`export const` props |
-| **internal** | Script functions/consts extracted through the TS/JS backend |
-| **hooks** | Svelte lifecycle calls and runes such as `onMount`, `$state`, `$derived`, `$effect` |
-| **types** | TypeScript types declared in `<script lang="ts">` |
-| **renders** | Svelte component tree from markup: `Layout > [Header, Slot]` |
+xray extracts imports and re-exports, functions, classes, types, React hooks, nested handlers, significant calls, tests, and JSX component trees. Vue and Svelte files include script symbols, framework hooks or runes, props, types, and template composition.
 
-### Vue
+A digest of a large TSX component looks like this:
 
-| Section | Content |
-|---------|---------|
-| **imports** | `<script>` module sources, including `.vue` components and local script `src` attributes |
-| **re-exports** | `<script>` re-exports grouped by source |
-| **exports** | The file's default component from `<template>` |
-| **internal** | `<script setup>` and normal script functions/consts extracted through the TS/JS backend |
-| **hooks** | Vue macros, lifecycle calls, refs/computed/watch, and `use*` composables |
-| **types** | TypeScript types declared in `<script lang="ts">` |
-| **renders** | Vue component tree from template tags: `Layout > [Header, user-card]` |
+```text
+apps/web/features/unialgo/components/Sidebar.tsx  (tsx, 968 lines)
 
-### Python
+imports: @/i18n/routing, ../api/professor, ../types
 
-| Section | Content |
-|---------|---------|
-| **imports** | `import` / `from ... import ...` dependencies (deduped) |
-| **exports** | Public top-level functions (by `__all__` when present, otherwise no leading `_`) |
-| **internal** | Non-public top-level functions |
-| **types** | Top-level classes/dataclasses with base classes + method summary |
-| **calls** | Function calls collected from function bodies |
+exports:
+  [component] const Sidebar = (...) =>  [L408-968]
+    hooks:
+      useRouter: router  [L431-431]
+      useTranslations: t  [L432-432]
+      useState: locale, setLocale  [L433-435]
+      useEffect  deps: [isAccountMenuOpen]  [L465-490]
+    handlers: handleLocaleSelect, handleCollapsedModeToggle
+    renders: PanelLeftOpen, PanelLeftClose, SageChatHistoryView, SidebarItem, Button
 
-Notes:
-- `--trace` and `--lsp` are not supported for Python yet.
-- Import resolution for follow/who is local-project only (no virtualenv/site-packages).
+internal:
+  [component] const SidebarItem = (...) =>  [L82-141]
+  [component] function SageChatHistoryView(...)  [L223-406]
+  const handlePointerDown = (...) =>  [L268-272]
+  const handlePointerDown = (...) =>  [L470-475]
 
-### Go
+types:
+  interface SidebarItemProps {href, icon, label, isActive, onClick, ...+1}  [L51-58]
+  type SidebarMode "menu" | "chat"  [L143-143]
+```
 
-| Section | Content |
-|---------|---------|
-| **imports** | Go import paths, including aliases for trace/LSP warm-up |
-| **exports** | Exported functions, methods, vars, and consts |
-| **internal** | Unexported functions, methods, vars, and consts |
-| **types** | Structs, interfaces, function types, aliases, and member summaries |
-| **tests** | `Test*`, `Benchmark*`, and `Fuzz*` functions |
-| **calls** | Function calls and selector calls such as `svc.Run` |
+Nested symbols keep their lexical scope during tracing, even when separate components reuse the same handler name.
 
-Notes:
-- Follow/who resolves local packages through `go.mod` module paths and relative package imports.
-- `--trace` works from extracted calls. `--trace --lsp` uses `gopls` for selector calls and cross-file method definitions.
+### Go, Python, PHP, and Rust
 
-### PHP
+For backend files, xray reports imports, functions and methods, classes or structs, interfaces and aliases, significant calls, tests where applicable, and exact source ranges. Go module paths resolve through `go.mod`; Go LSP tracing uses `gopls`.
 
-| Section | Content |
-|---------|---------|
-| **imports** | `use` declarations plus static `include` / `require` paths |
-| **exports** | Top-level constants and functions |
-| **types** | Classes, interfaces, traits, and enums, with member summaries |
-| **calls** | Function, method, static call, include, and require calls inside functions |
+### SQL and Markdown
 
-Notes:
-- `--trace` and `--lsp` are not supported for PHP yet.
-- Follow/who resolution supports relative include paths and basic local namespace-to-path lookup.
+SQL digests retain statement structure and relationships such as `target:`, `source:`, `join:`, `cte:`, and `fn:`. Markdown digests retain frontmatter, the heading tree, local and external links, and fenced-code languages. Follow mode traverses SQL includes and local Markdown links.
 
-### SQL
+## Optional language servers
 
-| Section | Content |
-|---------|---------|
-| **includes** | `\i`, `\ir`, `SOURCE`, `@@`, `@` directives |
-| **statements** | CREATE TABLE/INDEX/FUNCTION, INSERT, UPDATE, DELETE, SELECT, MERGE, ALTER TABLE |
-| **refs** | `target:`, `source:`, `join:`, `cte:`, `fn:` references per statement |
+Basic extraction, dependency following, and ordinary traces do not require a language server. Install one only when you need `--trace --lsp`:
 
-### Markdown
+```sh
+# TypeScript and JavaScript
+npm install -g typescript typescript-language-server
 
-| Section | Content |
-|---------|---------|
-| **frontmatter** | YAML/TOML frontmatter when present |
-| **headings** | Nested heading tree with line ranges |
-| **links** | Local and external links, including reference-style links |
-| **code fences** | Fenced code blocks with language labels |
+# Go
+go install golang.org/x/tools/gopls@latest
 
-## Modes
+# Svelte
+npm install -g svelte-language-server
+```
 
-| Mode | Flag | Description |
-|------|------|-------------|
-| **Follow** | *(default)* | Resolves local imports and shows a tree of digests (depth 1, noise filtered) |
-| **Follow deep** | `--depth N` | Same, with configurable recursion depth |
-| **No-follow** | `--no-follow` | Single file digest, no import resolution |
-| **Who** | `--who` | Reverse lookup — finds all project files that import the target |
-| **Trace** | `--trace` | Follows cross-file call chains from exports (depth 3) |
-| **Trace + LSP** | `--trace --lsp` | Resolves `this.method` and member calls via `typescript-language-server` |
-| **Trace symbol** | `--trace -s NAME` | Traces a single specific exported symbol |
-
-The `--all` flag disables noise filtering in follow and trace modes.
-`--trace` supports TypeScript/JavaScript, Go, Vue, and Svelte files. `--lsp` uses `typescript-language-server` for TypeScript/JavaScript, `gopls` for Go, and `svelte-language-server` for Svelte when installed; Vue trace does not require or use a Vue language server. For Markdown, follow and `--who` work on local links; trace is unsupported.
-
-## Supported files
-
-`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.mts`, `.cjs`, `.go`, `.vue`, `.svelte`, `.py`, `.php`, `.rs`, `.sql`, `.md`
+Vue traces use xray's own static resolution and do not require a Vue language server.
 
 ## How it works
 
-xray uses [tree-sitter](https://tree-sitter.github.io/) for code files and a dedicated Markdown parser for `.md` files, then walks those parsed structures to extract structural information. No regex, no string matching — just syntax-aware extraction.
+xray parses each file into a syntax tree, extracts a compact intermediate model, and resolves local project references only when the selected mode needs them. It uses tree-sitter grammars for code and a dedicated Markdown parser. Noise filtering keeps generated files, declarations, fixtures, and other low-signal dependencies out of the default tree; `--all` turns that filter off.
 
-- **TypeScript/JavaScript**: `tree-sitter-typescript`
-- **Go**: `tree-sitter-go` plus optional `gopls` for `--trace --lsp`
-- **Vue**: `octorus-tree-sitter-vue3` plus `tree-sitter-typescript` for `<script>` blocks
-- **Svelte**: `tree-sitter-svelte-ng` plus `tree-sitter-typescript` for `<script>` blocks
-- **Python**: `tree-sitter-python`
-- **PHP**: `tree-sitter-php`
-- **Rust**: `tree-sitter-rust`
-- **SQL**: `tree-sitter-sequel`
-- **Markdown**: `markdown`
+The tool does not execute code, infer runtime values, or replace a type checker. Dynamic imports, dependency injection, framework magic, and heavily computed call targets can remain unresolved. Use `--explain` to see resolution gaps, and treat a trace as a focused navigation map rather than a runtime profile.
+
+## Why use it with coding agents?
+
+Agents usually need a map before they need full implementations. Giving an agent xray output first helps it choose the few source ranges worth reading instead of loading entire files and their imports into context.
+
+A practical sequence is:
+
+```sh
+xray --no-follow src/feature.ts      # understand the target
+xray --who src/feature.ts            # check its impact radius
+xray --trace --lsp -s run src/feature.ts  # follow the behavior
+```
+
+Then open the exact ranges reported by xray.
 
 ## License
 
