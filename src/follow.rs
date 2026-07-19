@@ -2,15 +2,15 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::error::XrayError;
-use crate::lang::LanguageKind;
 use crate::model::FileSummary;
-use crate::output::FileDigest;
+use crate::project::{ProjectGraph, ResolutionStatus};
 use crate::resolve::{self, PathConfig};
 
 /// Configuration for follow mode.
 pub struct FollowConfig {
     pub max_depth: usize,
     pub show_all: bool,
+    pub explain: bool,
 }
 
 /// A node in the dependency tree.
@@ -39,13 +39,9 @@ pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
     })?;
 
     let path_config = entry.parent().and_then(resolve::load_path_config);
-    let digest = FileDigest::from_path(&entry)?;
-    let sources = digest.dependency_specifiers();
-    print!("{digest}");
-
-    if sources.is_empty() {
-        return Ok(());
-    }
+    let mut graph = ProjectGraph::new();
+    let entry = graph.load(&entry)?;
+    print!("{}", graph.digest(&entry).expect("entry was just loaded"));
 
     let mut visited = HashSet::new();
     visited.insert(entry.clone());
@@ -53,19 +49,7 @@ pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
     let mut children = Vec::new();
     let mut omitted = Vec::new();
 
-    for specifier in &sources {
-        let Some(resolved) = resolve_source_specifier(
-            digest.language_kind,
-            specifier,
-            &entry,
-            path_config.as_ref(),
-        ) else {
-            continue;
-        };
-
-        let Ok(canonical) = resolved.canonicalize() else {
-            continue;
-        };
+    for canonical in graph.dependencies(&entry, path_config.as_ref())? {
         if !visited.insert(canonical.clone()) {
             continue;
         }
@@ -75,7 +59,14 @@ pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
             continue;
         }
 
-        match build_subtree(&canonical, 1, config, path_config.as_ref(), &mut visited) {
+        match build_subtree(
+            &canonical,
+            1,
+            config,
+            path_config.as_ref(),
+            &mut visited,
+            &mut graph,
+        ) {
             Ok(node) => children.push(node),
             Err(e) => eprintln!("xray: {e}"),
         }
@@ -84,6 +75,9 @@ pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
     if !children.is_empty() || !omitted.is_empty() {
         println!("│");
         render_tree(&children, &omitted, "");
+    }
+    if config.explain {
+        render_diagnostics(&graph);
     }
 
     Ok(())
@@ -96,26 +90,15 @@ fn build_subtree(
     config: &FollowConfig,
     path_config: Option<&PathConfig>,
     visited: &mut HashSet<PathBuf>,
+    graph: &mut ProjectGraph,
 ) -> Result<DepNode, XrayError> {
-    let digest = FileDigest::from_path(path)?;
-    let summary = digest.summarize();
+    let summary = graph.summary(path)?;
 
     let mut children = Vec::new();
     let mut omitted = Vec::new();
 
     if depth < config.max_depth {
-        let sources = digest.dependency_specifiers();
-
-        for specifier in &sources {
-            let Some(resolved) =
-                resolve_source_specifier(digest.language_kind, specifier, path, path_config)
-            else {
-                continue;
-            };
-
-            let Ok(canonical) = resolved.canonicalize() else {
-                continue;
-            };
+        for canonical in graph.dependencies(path, path_config)? {
             if !visited.insert(canonical.clone()) {
                 continue;
             }
@@ -125,7 +108,7 @@ fn build_subtree(
                 continue;
             }
 
-            match build_subtree(&canonical, depth + 1, config, path_config, visited) {
+            match build_subtree(&canonical, depth + 1, config, path_config, visited, graph) {
                 Ok(node) => children.push(node),
                 Err(e) => eprintln!("xray: {e}"),
             }
@@ -139,13 +122,23 @@ fn build_subtree(
     })
 }
 
-fn resolve_source_specifier(
-    language_kind: LanguageKind,
-    specifier: &str,
-    from_file: &Path,
-    path_config: Option<&PathConfig>,
-) -> Option<PathBuf> {
-    language_kind.resolve_source_specifier(specifier, from_file, path_config)
+fn render_diagnostics(graph: &ProjectGraph) {
+    let stats = graph.stats();
+    println!(
+        "\nresolution: {} resolved, {} external, {} unresolved",
+        stats.resolved, stats.external, stats.unresolved
+    );
+    for diagnostic in graph
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.status == ResolutionStatus::Unresolved)
+    {
+        println!(
+            "  unresolved: {} from {}",
+            diagnostic.specifier,
+            crate::util::relative_path(&diagnostic.from)
+        );
+    }
 }
 
 /// Render the dependency tree with box-drawing characters.
@@ -226,6 +219,7 @@ mod tests {
         FollowConfig {
             max_depth,
             show_all: true,
+            explain: false,
         }
     }
 
@@ -272,7 +266,15 @@ mod tests {
         fs::write(&grandchild, "SELECT 2;").unwrap();
 
         let mut visited = HashSet::new();
-        let tree = build_subtree(&root, 0, &follow_config(2), None, &mut visited).unwrap();
+        let tree = build_subtree(
+            &root,
+            0,
+            &follow_config(2),
+            None,
+            &mut visited,
+            &mut ProjectGraph::new(),
+        )
+        .unwrap();
 
         assert_eq!(tree.children.len(), 1);
         assert!(tree.summary.display_path.ends_with("root.sql"));
@@ -304,7 +306,15 @@ mod tests {
         fs::write(&leaf, "export function leaf() { return 1; }").unwrap();
 
         let mut visited = HashSet::new();
-        let tree = build_subtree(&root, 0, &follow_config(2), None, &mut visited).unwrap();
+        let tree = build_subtree(
+            &root,
+            0,
+            &follow_config(2),
+            None,
+            &mut visited,
+            &mut ProjectGraph::new(),
+        )
+        .unwrap();
 
         assert_eq!(tree.children.len(), 1);
         assert!(tree.summary.display_path.ends_with("main.ts"));
@@ -338,7 +348,15 @@ mod tests {
         fs::write(&leaf, "def value():\n    return 1\n").unwrap();
 
         let mut visited = HashSet::new();
-        let tree = build_subtree(&root, 0, &follow_config(2), None, &mut visited).unwrap();
+        let tree = build_subtree(
+            &root,
+            0,
+            &follow_config(2),
+            None,
+            &mut visited,
+            &mut ProjectGraph::new(),
+        )
+        .unwrap();
 
         assert_eq!(tree.children.len(), 1);
         assert!(tree.summary.display_path.ends_with("main.py"));
@@ -363,7 +381,15 @@ mod tests {
         fs::write(&api, "# API").unwrap();
 
         let mut visited = HashSet::new();
-        let tree = build_subtree(&root, 0, &follow_config(2), None, &mut visited).unwrap();
+        let tree = build_subtree(
+            &root,
+            0,
+            &follow_config(2),
+            None,
+            &mut visited,
+            &mut ProjectGraph::new(),
+        )
+        .unwrap();
 
         assert_eq!(tree.children.len(), 1);
         assert!(tree.summary.display_path.ends_with("README.md"));

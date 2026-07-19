@@ -12,6 +12,7 @@ mod lsp;
 mod model;
 mod output;
 mod parser;
+mod project;
 mod resolve;
 mod reverse;
 mod trace;
@@ -30,12 +31,20 @@ enum Mode {
     Trace,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
 struct CliArgs {
     mode: Mode,
     target_symbol: Option<String>,
     depth: Option<usize>,
     show_all: bool,
     use_lsp: bool,
+    format: OutputFormat,
+    explain: bool,
     files: Vec<String>,
 }
 
@@ -45,6 +54,8 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut depth: Option<usize> = None;
     let mut show_all = false;
     let mut use_lsp = false;
+    let mut format = OutputFormat::Text;
+    let mut explain = false;
     let mut files = Vec::new();
     let mut i = 0;
 
@@ -55,6 +66,18 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--trace" => mode_flags.push("--trace"),
             "--all" => show_all = true,
             "--lsp" => use_lsp = true,
+            "--explain" | "--stats" => explain = true,
+            "--format" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--format requires text or json".to_string());
+                }
+                format = match args[i].as_str() {
+                    "text" => OutputFormat::Text,
+                    "json" => OutputFormat::Json,
+                    value => return Err(format!("--format: unsupported value '{value}'")),
+                };
+            }
             "--symbol" | "-s" => {
                 i += 1;
                 if i >= args.len() {
@@ -88,6 +111,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         Some("--no-follow") => Mode::NoFollow,
         Some("--who") => Mode::Who,
         Some("--trace") => Mode::Trace,
+        _ if format == OutputFormat::Json => Mode::NoFollow,
         _ => Mode::Follow,
     };
 
@@ -102,6 +126,12 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     if use_lsp && !matches!(mode, Mode::Trace) {
         return Err("--lsp requires --trace".to_string());
     }
+    if format == OutputFormat::Json && !matches!(mode, Mode::NoFollow) {
+        return Err("--format json currently supports digest mode only".to_string());
+    }
+    if format == OutputFormat::Json && files.len() > 1 {
+        return Err("--format json requires exactly one file".to_string());
+    }
 
     Ok(CliArgs {
         mode,
@@ -109,6 +139,8 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         depth,
         show_all,
         use_lsp,
+        format,
+        explain,
         files,
     })
 }
@@ -116,8 +148,12 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
 
-    if raw.is_empty() || raw[0] == "-h" || raw[0] == "--help" {
+    if raw.is_empty() || raw.iter().any(|arg| arg == "-h" || arg == "--help") {
         print_help();
+        std::process::exit(0);
+    }
+    if raw.iter().any(|arg| arg == "-V" || arg == "--version") {
+        println!("xray {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
 
@@ -135,6 +171,7 @@ fn main() {
     }
 
     let multi = args.files.len() > 1;
+    let mut had_error = false;
     for (i, path_str) in args.files.iter().enumerate() {
         if i > 0 && multi {
             println!("\n---\n");
@@ -150,24 +187,32 @@ fn main() {
                 trace::run(path_str, &config)
             }
             Mode::Who => reverse::run(path_str),
-            Mode::NoFollow => process_file(path_str),
+            Mode::NoFollow => process_file(path_str, args.format),
             Mode::Follow => {
                 let config = follow::FollowConfig {
                     max_depth: args.depth.unwrap_or(1),
                     show_all: args.show_all,
+                    explain: args.explain,
                 };
                 follow::run(path_str, &config)
             }
         };
         if let Err(e) = result {
             eprintln!("xray: {e}");
+            had_error = true;
         }
+    }
+    if had_error {
+        std::process::exit(1);
     }
 }
 
-fn process_file(path_str: &str) -> Result<(), XrayError> {
+fn process_file(path_str: &str, format: OutputFormat) -> Result<(), XrayError> {
     let digest = FileDigest::from_path(Path::new(path_str))?;
-    print!("{digest}");
+    match format {
+        OutputFormat::Text => print!("{digest}"),
+        OutputFormat::Json => println!("{}", digest.to_json()?),
+    }
     Ok(())
 }
 
@@ -185,6 +230,9 @@ fn print_help() {
     eprintln!("  --lsp              Use LSP to resolve member calls (requires --trace)");
     eprintln!("  --symbol N, -s N   Trace a specific symbol (requires --trace)");
     eprintln!("  --no-follow        Disable follow, show only the target file");
+    eprintln!("  --format F         Output format: text or json (JSON is a single-file digest)");
+    eprintln!("  --explain, --stats Show dependency resolution counts and unresolved imports");
+    eprintln!("  -V, --version      Show version");
     eprintln!("  -h, --help         Show help");
     eprintln!();
     eprintln!("Compresses supported files to ~10% showing only structure:");
@@ -334,5 +382,19 @@ mod tests {
     fn parse_args_lsp_default_false() {
         let args = parse_args(&["--trace".into(), "file.ts".into()]).unwrap();
         assert!(!args.use_lsp);
+    }
+
+    #[test]
+    fn parse_args_json_rejects_multiple_files() {
+        let result = parse_args(&[
+            "--format".into(),
+            "json".into(),
+            "one.ts".into(),
+            "two.ts".into(),
+        ]);
+        assert_eq!(
+            result.err().as_deref(),
+            Some("--format json requires exactly one file")
+        );
     }
 }

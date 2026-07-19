@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use tree_sitter::{Language as TsLanguage, Node};
 
 use crate::error::XrayError;
@@ -11,7 +12,8 @@ use crate::{extract, resolve};
 /// This is the central isolation boundary used by parser/extractor/dependency
 /// resolution codepaths. New languages should plug in here rather than adding
 /// `if ext == ...` checks across the codebase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LanguageKind {
     Ts,
     Sql,

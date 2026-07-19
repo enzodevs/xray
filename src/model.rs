@@ -1,7 +1,51 @@
 use std::fmt;
 
+use serde::Serialize;
+
+/// Stable one-based source range used by machine-readable output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Span {
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+/// Normalized symbol category. Extractors retain richer text in `signature`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolKind {
+    Function,
+    Method,
+    Variable,
+    Class,
+    Interface,
+    Trait,
+    Enum,
+    SqlStatement,
+    Component,
+    Unknown,
+}
+
+/// Normalized relationship category for calls and structural references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceKind {
+    Call,
+    Target,
+    Source,
+    Join,
+    Cte,
+    Function,
+}
+
+/// Typed view over the compact strings retained by extractors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reference {
+    pub kind: ReferenceKind,
+    pub target: String,
+}
+
 /// A JSX component node in the render tree.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct JsxNode {
     pub name: String,
     pub children: Vec<JsxNode>,
@@ -39,6 +83,194 @@ pub struct Symbol {
     pub hooks: Vec<Hook>,
     pub handlers: Vec<String>,
     pub decorators: Vec<String>,
+}
+
+impl Symbol {
+    pub fn span(&self) -> Span {
+        Span {
+            start_line: self.line_start,
+            end_line: self.line_end,
+        }
+    }
+
+    pub fn name(&self) -> String {
+        symbol_name_from_signature(&self.signature)
+    }
+
+    pub fn kind(&self) -> SymbolKind {
+        symbol_kind_from_signature(&self.signature, self.is_component)
+    }
+
+    pub fn references(&self) -> Vec<Reference> {
+        self.calls
+            .iter()
+            .map(|value| Reference::from(value.as_str()))
+            .collect()
+    }
+}
+
+impl From<&str> for Reference {
+    fn from(value: &str) -> Self {
+        let prefixes = [
+            ("target:", ReferenceKind::Target),
+            ("source:", ReferenceKind::Source),
+            ("join:", ReferenceKind::Join),
+            ("cte:", ReferenceKind::Cte),
+            ("fn:", ReferenceKind::Function),
+        ];
+        for (prefix, kind) in prefixes {
+            if let Some(target) = value.strip_prefix(prefix) {
+                return Self {
+                    kind,
+                    target: target.to_string(),
+                };
+            }
+        }
+        Self {
+            kind: ReferenceKind::Call,
+            target: value.to_string(),
+        }
+    }
+}
+
+fn symbol_kind_from_signature(signature: &str, is_component: bool) -> SymbolKind {
+    if is_component {
+        return SymbolKind::Component;
+    }
+    let lower = signature.trim_start().to_ascii_lowercase();
+    if [
+        "create ", "alter ", "select ", "insert ", "update ", "delete ", "merge ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+    {
+        SymbolKind::SqlStatement
+    } else if lower.contains(" class ") || lower.starts_with("class ") {
+        SymbolKind::Class
+    } else if lower.contains(" interface ") || lower.starts_with("interface ") {
+        SymbolKind::Interface
+    } else if lower.contains(" trait ") || lower.starts_with("trait ") {
+        SymbolKind::Trait
+    } else if lower.contains(" enum ") || lower.starts_with("enum ") {
+        SymbolKind::Enum
+    } else if ["const ", "let ", "var "]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        SymbolKind::Variable
+    } else if lower.starts_with("func (") {
+        SymbolKind::Method
+    } else if ["fn ", "func ", "function ", "def "]
+        .iter()
+        .any(|marker| lower.starts_with(marker) || lower.contains(marker))
+    {
+        SymbolKind::Function
+    } else if signature.contains('(') {
+        SymbolKind::Method
+    } else {
+        SymbolKind::Unknown
+    }
+}
+
+fn symbol_name_from_signature(signature: &str) -> String {
+    let mut value = signature.trim();
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let sql_name_index = match words.as_slice() {
+        [first, second, ..]
+            if first.eq_ignore_ascii_case("create") && second.eq_ignore_ascii_case("or") =>
+        {
+            Some(4)
+        }
+        [first, second, ..]
+            if (first.eq_ignore_ascii_case("insert") && second.eq_ignore_ascii_case("into"))
+                || (first.eq_ignore_ascii_case("delete")
+                    && second.eq_ignore_ascii_case("from"))
+                || (first.eq_ignore_ascii_case("merge") && second.eq_ignore_ascii_case("into")) =>
+        {
+            Some(2)
+        }
+        [first, ..]
+            if first.eq_ignore_ascii_case("create") || first.eq_ignore_ascii_case("alter") =>
+        {
+            Some(2)
+        }
+        [first, ..] if first.eq_ignore_ascii_case("update") => Some(1),
+        _ => None,
+    };
+    if let Some(index) = sql_name_index {
+        return words.get(index).map_or_else(
+            || "?".to_string(),
+            |name| {
+                name.split('(')
+                    .next()
+                    .unwrap_or(name)
+                    .trim_end_matches(';')
+                    .to_string()
+            },
+        );
+    }
+    let declaration_prefixes = [
+        "pub ",
+        "public ",
+        "private ",
+        "protected ",
+        "static ",
+        "abstract ",
+        "override ",
+        "readonly ",
+        "async ",
+        "unsafe ",
+        "def ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "class ",
+        "interface ",
+        "trait ",
+        "enum ",
+        "func ",
+        "fn ",
+    ];
+    loop {
+        let before = value;
+        for prefix in declaration_prefixes {
+            value = value.trim_start_matches(prefix);
+        }
+        if value == before {
+            break;
+        }
+    }
+    if let Some((_, rest)) = value.strip_prefix('(').and_then(|s| s.split_once(") ")) {
+        value = rest;
+    }
+    value
+        .split(['(', '=', '<', ' ', ':'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("?")
+        .to_string()
+}
+
+impl Serialize for Symbol {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Symbol", 10)?;
+        state.serialize_field("name", &self.name())?;
+        state.serialize_field("kind", &self.kind())?;
+        state.serialize_field("signature", &self.signature)?;
+        state.serialize_field("span", &self.span())?;
+        state.serialize_field("references", &self.references())?;
+        state.serialize_field("component", &self.is_component)?;
+        state.serialize_field("renders", &self.renders)?;
+        state.serialize_field("hooks", &self.hooks)?;
+        state.serialize_field("handlers", &self.handlers)?;
+        state.serialize_field("decorators", &self.decorators)?;
+        state.end()
+    }
 }
 
 /// Wrapper for indented display of a value.
@@ -147,6 +379,7 @@ fn is_structural_ref(value: &str) -> bool {
 }
 
 /// A single name imported from another module.
+#[derive(Serialize)]
 pub struct ImportBinding {
     pub local_name: String,
     pub source: String,
@@ -154,6 +387,7 @@ pub struct ImportBinding {
 }
 
 /// A re-export statement (`export { x } from './module'`).
+#[derive(Serialize)]
 pub struct ReExport {
     pub names: Vec<String>,
     pub source: String,
@@ -161,6 +395,7 @@ pub struct ReExport {
 }
 
 /// A type definition (interface, type alias, or enum).
+#[derive(Serialize)]
 pub struct TypeDef {
     pub name: String,
     pub kind: String,
@@ -187,6 +422,7 @@ impl fmt::Display for Indented<'_, TypeDef> {
 }
 
 /// A test block (`describe`, `it`, or `test`) with optional nesting.
+#[derive(Serialize)]
 pub struct TestBlock {
     pub kind: String,
     pub name: String,
@@ -216,6 +452,7 @@ pub fn write_test_tree(
 }
 
 /// A React hook call extracted from a component.
+#[derive(Serialize)]
 pub struct Hook {
     pub kind: String,
     pub bindings: Vec<String>,
@@ -243,6 +480,7 @@ impl fmt::Display for Indented<'_, Hook> {
 }
 
 /// A heading in a Markdown document.
+#[derive(Serialize)]
 pub struct MarkdownHeading {
     pub title: String,
     pub depth: u8,
@@ -279,6 +517,7 @@ pub fn write_markdown_heading_tree(
 }
 
 /// A link-like reference extracted from a Markdown document.
+#[derive(Serialize)]
 pub struct MarkdownLink {
     pub label: String,
     pub target: String,
@@ -310,6 +549,7 @@ impl fmt::Display for Indented<'_, MarkdownLink> {
 }
 
 /// A fenced code block extracted from a Markdown document.
+#[derive(Serialize)]
 pub struct MarkdownCodeBlock {
     pub language: Option<String>,
     pub line_start: usize,
@@ -329,6 +569,7 @@ impl fmt::Display for Indented<'_, MarkdownCodeBlock> {
 }
 
 /// Frontmatter block extracted from a Markdown document.
+#[derive(Serialize)]
 pub struct MarkdownFrontmatter {
     pub kind: String,
     pub line_start: usize,
@@ -347,6 +588,7 @@ impl fmt::Display for Indented<'_, MarkdownFrontmatter> {
 }
 
 /// Structured digest data for a Markdown document.
+#[derive(Serialize)]
 pub struct MarkdownDocument {
     pub frontmatter: Option<MarkdownFrontmatter>,
     pub headings: Vec<MarkdownHeading>,
@@ -373,6 +615,7 @@ pub enum FileSummaryKind {
 }
 
 /// All code symbols extracted from a single file.
+#[derive(Serialize)]
 pub struct FileSymbols {
     pub imports: Vec<String>,
     pub import_bindings: Vec<ImportBinding>,
@@ -385,6 +628,8 @@ pub struct FileSymbols {
 }
 
 /// Structured content extracted from a supported file.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum FileContent {
     Code(FileSymbols),
     Markdown(MarkdownDocument),
@@ -396,5 +641,50 @@ impl FileContent {
             Self::Code(symbols) => Some(symbols),
             Self::Markdown(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{symbol_kind_from_signature, symbol_name_from_signature, SymbolKind};
+
+    #[test]
+    fn extracts_names_after_multiple_declaration_modifiers() {
+        assert_eq!(
+            symbol_name_from_signature("async const load = () => value"),
+            "load"
+        );
+        assert_eq!(
+            symbol_name_from_signature("pub unsafe fn process()"),
+            "process"
+        );
+    }
+
+    #[test]
+    fn classifies_go_receiver_functions_as_methods() {
+        assert_eq!(
+            symbol_kind_from_signature("func (s *Server) Start()", false),
+            SymbolKind::Method
+        );
+        assert_eq!(
+            symbol_kind_from_signature("func Start()", false),
+            SymbolKind::Function
+        );
+    }
+
+    #[test]
+    fn extracts_sql_target_names() {
+        assert_eq!(
+            symbol_name_from_signature("CREATE TABLE objects"),
+            "objects"
+        );
+        assert_eq!(
+            symbol_name_from_signature("CREATE OR REPLACE FUNCTION get_tenant_id()"),
+            "get_tenant_id"
+        );
+        assert_eq!(
+            symbol_name_from_signature("INSERT INTO audit_log"),
+            "audit_log"
+        );
     }
 }

@@ -70,6 +70,23 @@ impl FileDigest {
     pub fn code_symbols(&self) -> Option<&FileSymbols> {
         self.content.as_code()
     }
+
+    /// Render the stable machine-readable schema.
+    pub fn to_json(&self) -> Result<String, XrayError> {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "mode": "digest",
+            "file": {
+                "path": self.display_path,
+                "language": self.language_kind,
+                "extension": self.ext,
+                "total_lines": self.total_lines,
+                "content": self.content,
+            }
+        });
+        serde_json::to_string_pretty(&value)
+            .map_err(|error| XrayError::ParseFailed(format!("serialize JSON: {error}")))
+    }
 }
 
 /// Extract the primary identifier from a symbol signature.
