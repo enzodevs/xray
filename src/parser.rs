@@ -88,6 +88,15 @@ impl ParsedFile {
             ParsedContent::Markdown(root) => crate::extract::extract_markdown_sources_only(root),
         }
     }
+
+    pub fn diagnostic_specifiers(&self) -> Vec<String> {
+        match &self.content {
+            ParsedContent::Code(tree) => self
+                .language_kind
+                .extract_diagnostic_specifiers_from_ast(tree.root_node(), self.source.as_bytes()),
+            ParsedContent::Markdown(root) => crate::extract::extract_markdown_sources_only(root),
+        }
+    }
 }
 
 pub(crate) fn markdown_parse_options() -> ParseOptions {

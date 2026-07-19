@@ -16,6 +16,7 @@ pub struct FileDigest {
     pub ext: String,
     pub total_lines: usize,
     pub content: FileContent,
+    pub(crate) diagnostic_specifiers: Vec<String>,
 }
 
 impl FileDigest {
@@ -28,6 +29,7 @@ impl FileDigest {
             .to_string();
 
         let parsed = parser::parse_file(path)?;
+        let diagnostic_specifiers = parsed.diagnostic_specifiers();
         let content = parsed.extract_content();
         let total_lines = parsed.source.lines().count();
         let display_path = util::relative_path(path);
@@ -38,6 +40,7 @@ impl FileDigest {
             ext,
             total_lines,
             content,
+            diagnostic_specifiers,
         })
     }
 
@@ -65,6 +68,10 @@ impl FileDigest {
     pub fn dependency_specifiers(&self) -> Vec<String> {
         self.language_kind
             .collect_dependency_specifiers(&self.content)
+    }
+
+    pub fn diagnostic_specifiers(&self) -> &[String] {
+        &self.diagnostic_specifiers
     }
 
     pub fn code_symbols(&self) -> Option<&FileSymbols> {
@@ -509,6 +516,7 @@ mod tests {
             ext: "ts".to_string(),
             total_lines: 2,
             content: FileContent::Code(symbols),
+            diagnostic_specifiers: Vec::new(),
         };
 
         let rendered = format!("{digest}");
@@ -529,6 +537,7 @@ mod tests {
             ext: "sql".to_string(),
             total_lines: 1,
             content: FileContent::Code(symbols),
+            diagnostic_specifiers: Vec::new(),
         };
 
         let rendered = format!("{digest}");

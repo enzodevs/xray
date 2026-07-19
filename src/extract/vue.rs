@@ -3,7 +3,7 @@ use tree_sitter::{Node, Parser};
 use crate::model::{FileSymbols, Hook, JsxNode, Symbol};
 use crate::util::{trim_quotes, txt};
 
-use super::{calls, extract_sources_only, extract_symbols};
+use super::{calls, extract_all_sources, extract_sources_only, extract_symbols};
 
 #[derive(Clone, Copy)]
 enum ScriptDialect {
@@ -32,14 +32,24 @@ pub(super) fn extract_symbols_from_vue(root: Node, src: &[u8]) -> FileSymbols {
 }
 
 pub(super) fn extract_sources_only_from_vue(root: Node, src: &[u8]) -> Vec<String> {
+    extract_vue_sources(root, src, false)
+}
+
+pub(super) fn extract_all_sources_from_vue(root: Node, src: &[u8]) -> Vec<String> {
+    extract_vue_sources(root, src, true)
+}
+
+fn extract_vue_sources(root: Node, src: &[u8], include_external: bool) -> Vec<String> {
     let script_ranges = collect_script_ranges(root, src);
     let mut sources = collect_script_srcs(root, src);
 
     if let Some((tree, virtual_src)) = parse_script_tree(src, &script_ranges) {
-        extend_unique(
-            &mut sources,
-            extract_sources_only(tree.root_node(), virtual_src.as_bytes()),
-        );
+        let script_sources = if include_external {
+            extract_all_sources(tree.root_node(), virtual_src.as_bytes())
+        } else {
+            extract_sources_only(tree.root_node(), virtual_src.as_bytes())
+        };
+        extend_unique(&mut sources, script_sources);
     }
 
     sources

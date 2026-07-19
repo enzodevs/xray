@@ -48,6 +48,11 @@ pub(crate) fn resolve_import(
                 return Some(resolved);
             }
         }
+        if cfg.has_explicit_base_url {
+            if let Some(resolved) = try_extensions(&cfg.base_url.join(specifier)) {
+                return Some(resolved);
+            }
+        }
     }
 
     // Fallback: @/ -> <git_root>/src/ when no path config.
@@ -59,7 +64,11 @@ pub(crate) fn resolve_import(
         }
     }
 
-    if let Some(rest) = specifier.strip_prefix("$lib/") {
+    if specifier == "$lib" {
+        if let Some(resolved) = resolve_sveltekit_lib_alias(parent, "") {
+            return Some(resolved);
+        }
+    } else if let Some(rest) = specifier.strip_prefix("$lib/") {
         if let Some(resolved) = resolve_sveltekit_lib_alias(parent, rest) {
             return Some(resolved);
         }
@@ -88,24 +97,30 @@ pub(crate) fn load_path_config(start_dir: &Path) -> Option<PathConfig> {
     let compiler = val.get("compilerOptions")?;
     let tsconfig_dir = tsconfig_path.parent()?;
 
-    let base_url = compiler
-        .get("baseUrl")
-        .and_then(serde_json::Value::as_str)
-        .map_or_else(|| tsconfig_dir.to_path_buf(), |b| tsconfig_dir.join(b));
+    let configured_base_url = compiler.get("baseUrl").and_then(serde_json::Value::as_str);
+    let base_url =
+        configured_base_url.map_or_else(|| tsconfig_dir.to_path_buf(), |b| tsconfig_dir.join(b));
 
-    let paths = compiler.get("paths")?.as_object()?;
     let mut aliases = Vec::new();
-
-    for (pattern, targets) in paths {
-        let replacements: Vec<String> = targets
-            .as_array()?
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        aliases.push((pattern.clone(), replacements));
+    if let Some(paths) = compiler.get("paths").and_then(serde_json::Value::as_object) {
+        for (pattern, targets) in paths {
+            let replacements: Vec<String> = targets
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            aliases.push((pattern.clone(), replacements));
+        }
+    }
+    if configured_base_url.is_none() && aliases.is_empty() {
+        return None;
     }
 
-    Some(PathConfig { base_url, aliases })
+    Some(PathConfig {
+        base_url,
+        has_explicit_base_url: configured_base_url.is_some(),
+        aliases,
+    })
 }
 
 /// Try a base path with various extensions: direct, .ts, .tsx, .js, .jsx,
@@ -125,7 +140,10 @@ fn resolve_sveltekit_lib_alias(start_dir: &Path, rest: &str) -> Option<PathBuf> 
 }
 
 fn is_local_module_specifier(source: &str) -> bool {
-    source.starts_with('.') || source.starts_with('@') || source.starts_with("$lib/")
+    source.starts_with('.')
+        || source.starts_with('@')
+        || source == "$lib"
+        || source.starts_with("$lib/")
 }
 
 /// Expand an alias pattern against a specifier.
@@ -495,6 +513,7 @@ mod tests {
 
         let cfg = PathConfig {
             base_url: dir.path().to_path_buf(),
+            has_explicit_base_url: true,
             aliases: vec![("@/*".to_string(), vec!["src/*".to_string()])],
         };
 
@@ -553,5 +572,43 @@ mod tests {
 
         let result = resolve_import("$lib/components/Button", &entry, None);
         assert_eq!(result, Some(target));
+    }
+
+    #[test]
+    fn resolve_import_uses_base_url_without_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let entry = src.join("app.ts");
+        fs::write(&entry, "").unwrap();
+        let target = src.join("utils.ts");
+        fs::write(&target, "").unwrap();
+        fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+        )
+        .unwrap();
+
+        let cfg = load_path_config(dir.path()).unwrap();
+        assert!(cfg.aliases.is_empty());
+        assert_eq!(
+            resolve_import("src/utils", &entry, Some(&cfg)),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn resolve_import_finds_exact_sveltekit_lib_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("src").join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        let target = lib.join("index.ts");
+        fs::write(&target, "").unwrap();
+        let routes = dir.path().join("src").join("routes");
+        fs::create_dir(&routes).unwrap();
+        let entry = routes.join("+page.svelte");
+        fs::write(&entry, "").unwrap();
+
+        assert_eq!(resolve_import("$lib", &entry, None), Some(target));
     }
 }

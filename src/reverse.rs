@@ -430,6 +430,7 @@ mod tests {
                 tests: Vec::new(),
                 hooks: Vec::new(),
             }),
+            diagnostic_specifiers: Vec::new(),
         };
         assert!(extract_target_function_names(&digest).is_empty());
     }
@@ -475,6 +476,7 @@ mod tests {
                 tests: Vec::new(),
                 hooks: Vec::new(),
             }),
+            diagnostic_specifiers: Vec::new(),
         };
 
         let names = extract_target_function_names(&digest);

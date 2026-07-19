@@ -16,7 +16,18 @@ use std::path::PathBuf;
 /// in `resolve::ts` / `resolve::sql`.
 pub struct PathConfig {
     base_url: PathBuf,
+    has_explicit_base_url: bool,
     aliases: Vec<(String, Vec<String>)>,
+}
+
+impl PathConfig {
+    pub(crate) fn matches_alias(&self, specifier: &str) -> bool {
+        self.aliases.iter().any(|(pattern, _)| {
+            pattern
+                .strip_suffix('*')
+                .map_or(specifier == pattern, |prefix| specifier.starts_with(prefix))
+        })
+    }
 }
 
 pub(crate) use go::resolve_go_import;

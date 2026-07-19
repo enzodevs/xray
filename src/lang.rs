@@ -139,6 +139,16 @@ impl LanguageKind {
         }
     }
 
+    /// Extract dependency specifiers for diagnostics, including external packages.
+    pub fn extract_diagnostic_specifiers_from_ast(self, root: Node, src: &[u8]) -> Vec<String> {
+        match self {
+            Self::Ts => extract::extract_all_ts_sources(root, src),
+            Self::Svelte => extract::extract_all_svelte_sources(root, src),
+            Self::Vue => extract::extract_all_vue_sources(root, src),
+            _ => self.extract_dependency_specifiers_from_ast(root, src),
+        }
+    }
+
     /// Collect dependency specifiers from an already-extracted symbol table.
     pub fn collect_dependency_specifiers(self, content: &FileContent) -> Vec<String> {
         match (self, content) {

@@ -80,7 +80,12 @@ impl ProjectGraph {
             ));
         };
         let language = digest.language_kind;
-        let specifiers = digest.dependency_specifiers();
+        let mut specifiers = digest.dependency_specifiers();
+        for specifier in digest.diagnostic_specifiers() {
+            if !specifiers.contains(specifier) {
+                specifiers.push(specifier.clone());
+            }
+        }
         let mut resolved = Vec::new();
 
         for specifier in specifiers {
@@ -94,7 +99,7 @@ impl ProjectGraph {
                 } else {
                     ResolutionStatus::Unresolved
                 }
-            } else if is_external_specifier(language, &specifier) {
+            } else if is_external_specifier(language, &specifier, path_config) {
                 ResolutionStatus::External
             } else {
                 ResolutionStatus::Unresolved
@@ -125,18 +130,29 @@ impl ProjectGraph {
     }
 }
 
-fn is_external_specifier(language: crate::lang::LanguageKind, specifier: &str) -> bool {
+fn is_external_specifier(
+    language: crate::lang::LanguageKind,
+    specifier: &str,
+    path_config: Option<&PathConfig>,
+) -> bool {
     use crate::lang::LanguageKind;
     match language {
         LanguageKind::Ts | LanguageKind::Svelte | LanguageKind::Vue => {
-            !specifier.starts_with('.') && !specifier.starts_with('/')
+            !specifier.starts_with('.')
+                && !specifier.starts_with('/')
+                && specifier != "$lib"
+                && !specifier.starts_with("$lib/")
+                && !path_config.is_some_and(|config| config.matches_alias(specifier))
         }
         LanguageKind::Go | LanguageKind::Py => !specifier.starts_with('.'),
         LanguageKind::Php | LanguageKind::Rs => {
             !specifier.starts_with('.')
-                && !specifier.starts_with("crate")
-                && !specifier.starts_with("self")
-                && !specifier.starts_with("super")
+                && specifier != "crate"
+                && !specifier.starts_with("crate::")
+                && specifier != "self"
+                && !specifier.starts_with("self::")
+                && specifier != "super"
+                && !specifier.starts_with("super::")
         }
         LanguageKind::Sql | LanguageKind::Md => false,
     }
@@ -145,13 +161,48 @@ fn is_external_specifier(language: crate::lang::LanguageKind, specifier: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn scoped_npm_packages_and_go_stdlib_are_external() {
         assert!(is_external_specifier(
             crate::lang::LanguageKind::Ts,
-            "@scope/package"
+            "@scope/package",
+            None
         ));
-        assert!(is_external_specifier(crate::lang::LanguageKind::Go, "fmt"));
+        assert!(is_external_specifier(
+            crate::lang::LanguageKind::Go,
+            "fmt",
+            None
+        ));
+        assert!(!is_external_specifier(
+            crate::lang::LanguageKind::Ts,
+            "$lib/missing",
+            None
+        ));
+        assert!(is_external_specifier(
+            crate::lang::LanguageKind::Rs,
+            "crate_utils",
+            None
+        ));
+    }
+
+    #[test]
+    fn graph_diagnostics_include_external_and_unresolved_ts_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("main.ts");
+        fs::write(
+            &entry,
+            "import React from 'react';\nimport missing from './missing';",
+        )
+        .unwrap();
+
+        let mut graph = ProjectGraph::new();
+        assert!(graph.dependencies(&entry, None).unwrap().is_empty());
+        let stats = graph.stats();
+
+        assert_eq!(stats.external, 1);
+        assert_eq!(stats.unresolved, 1);
+        assert_eq!(stats.resolved, 0);
     }
 }

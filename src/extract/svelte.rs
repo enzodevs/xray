@@ -3,7 +3,7 @@ use tree_sitter::{Node, Parser};
 use crate::model::{FileSymbols, Hook, JsxNode, Symbol};
 use crate::util::txt;
 
-use super::{calls, extract_sources_only, extract_symbols};
+use super::{calls, extract_all_sources, extract_sources_only, extract_symbols};
 
 #[derive(Clone, Copy)]
 struct ScriptRange {
@@ -31,6 +31,15 @@ pub(super) fn extract_sources_only_from_svelte(root: Node, src: &[u8]) -> Vec<St
     };
 
     extract_sources_only(tree.root_node(), virtual_src.as_bytes())
+}
+
+pub(super) fn extract_all_sources_from_svelte(root: Node, src: &[u8]) -> Vec<String> {
+    let script_ranges = collect_script_ranges(root, src);
+    let Some((tree, virtual_src)) = parse_script_tree(src, &script_ranges) else {
+        return Vec::new();
+    };
+
+    extract_all_sources(tree.root_node(), virtual_src.as_bytes())
 }
 
 fn extract_script_symbols(src: &[u8], script_ranges: &[ScriptRange]) -> FileSymbols {

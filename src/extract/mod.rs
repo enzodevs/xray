@@ -56,6 +56,10 @@ pub(crate) fn extract_ts_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     extract_sources_only(root, src)
 }
 
+pub(crate) fn extract_all_ts_sources(root: Node, src: &[u8]) -> Vec<String> {
+    extract_all_sources(root, src)
+}
+
 /// SQL ecosystem dependency extractor entrypoint (include/source directives).
 pub(crate) fn extract_sql_sources_only(src: &[u8]) -> Vec<String> {
     sql::extract_sources_only(src)
@@ -96,6 +100,10 @@ pub(crate) fn extract_svelte_sources_only(root: Node, src: &[u8]) -> Vec<String>
     svelte::extract_sources_only_from_svelte(root, src)
 }
 
+pub(crate) fn extract_all_svelte_sources(root: Node, src: &[u8]) -> Vec<String> {
+    svelte::extract_all_sources_from_svelte(root, src)
+}
+
 /// Vue ecosystem extractor entrypoint.
 pub(crate) fn extract_vue_symbols(root: Node, src: &[u8]) -> FileSymbols {
     vue::extract_symbols_from_vue(root, src)
@@ -104,6 +112,10 @@ pub(crate) fn extract_vue_symbols(root: Node, src: &[u8]) -> FileSymbols {
 /// Vue ecosystem dependency extractor entrypoint (`<script>` imports/re-exports only).
 pub(crate) fn extract_vue_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     vue::extract_sources_only_from_vue(root, src)
+}
+
+pub(crate) fn extract_all_vue_sources(root: Node, src: &[u8]) -> Vec<String> {
+    vue::extract_all_sources_from_vue(root, src)
 }
 
 /// Markdown dependency extractor entrypoint (local links only).
@@ -871,6 +883,15 @@ fn extract_namespace(node: Node, src: &[u8], symbols: &mut FileSymbols) {
 /// Skips all function/class/type extraction. Used by reverse mode where only
 /// the import graph matters, not the full symbol table.
 pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
+    extract_sources(root, src, true)
+}
+
+/// Extract every import and re-export source, including package dependencies.
+pub fn extract_all_sources(root: Node, src: &[u8]) -> Vec<String> {
+    extract_sources(root, src, false)
+}
+
+fn extract_sources(root: Node, src: &[u8], local_only: bool) -> Vec<String> {
     let mut sources = Vec::new();
     let mut cursor = root.walk();
 
@@ -879,7 +900,9 @@ pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
             "import_statement" => {
                 if let Some(source_node) = node.child_by_field_name("source") {
                     let path = trim_quotes(txt(source_node, src));
-                    if is_local_module_specifier(path) && !sources.iter().any(|s| s == path) {
+                    if (!local_only || is_local_module_specifier(path))
+                        && !sources.iter().any(|s| s == path)
+                    {
                         sources.push(path.to_string());
                     }
                 }
@@ -887,7 +910,9 @@ pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
             "export_statement" => {
                 if let Some(source_node) = node.child_by_field_name("source") {
                     let path = trim_quotes(txt(source_node, src));
-                    if is_local_module_specifier(path) && !sources.iter().any(|s| s == path) {
+                    if (!local_only || is_local_module_specifier(path))
+                        && !sources.iter().any(|s| s == path)
+                    {
                         sources.push(path.to_string());
                     }
                 }
@@ -900,7 +925,7 @@ pub fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
 }
 
 fn is_local_module_specifier(path: &str) -> bool {
-    path.starts_with('.') || path.starts_with("@/") || path.starts_with("$lib/")
+    path.starts_with('.') || path.starts_with("@/") || path == "$lib" || path.starts_with("$lib/")
 }
 
 #[cfg(test)]
@@ -2027,6 +2052,14 @@ describe('suite', () => {
         let tree = parse_ts(src);
         let sources = extract_sources_only(tree.root_node(), src);
         assert_eq!(sources, vec!["./local"]);
+    }
+
+    #[test]
+    fn extract_all_sources_includes_external_imports() {
+        let src = b"import React from 'react';\nexport { X } from './local';";
+        let tree = parse_ts(src);
+        let sources = extract_all_sources(tree.root_node(), src);
+        assert_eq!(sources, vec!["react", "./local"]);
     }
 
     #[test]
