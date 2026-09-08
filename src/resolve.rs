@@ -14,6 +14,7 @@ use std::path::PathBuf;
 /// Kept at the facade layer because it is referenced by multiple command
 /// pipelines (`follow`, `reverse`, `trace`) while backend-specific logic lives
 /// in `resolve::ts` / `resolve::sql`.
+#[derive(Clone)]
 pub struct PathConfig {
     base_url: PathBuf,
     has_explicit_base_url: bool,
@@ -32,7 +33,7 @@ impl PathConfig {
 
 pub(crate) use go::resolve_go_import;
 pub(crate) use markdown::resolve_markdown_link;
-pub(crate) use php::resolve_php_import;
+pub(crate) use php::{resolve_php_import, resolve_php_import_with_paths, PhpPaths};
 pub(crate) use py::resolve_py_import;
 pub(crate) use rs::resolve_rs_import;
 pub(crate) use sql::resolve_sql_include;

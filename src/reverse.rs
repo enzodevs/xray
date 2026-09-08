@@ -1,4 +1,6 @@
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::error::XrayError;
 use crate::lang::{self, LanguageKind};
@@ -23,7 +25,7 @@ pub fn run(target_path: &str) -> Result<(), XrayError> {
 
     let path_config = target.parent().and_then(resolve::load_path_config);
     let target_fn_names = extract_target_function_names(&digest);
-    let importers = find_importers(&git_root, &target, path_config.as_ref(), &target_fn_names);
+    let importers = find_importers(&git_root, &target, path_config.as_ref(), &target_fn_names)?;
 
     println!("── imported by ──");
     println!();
@@ -91,8 +93,10 @@ fn find_importers(
     target: &Path,
     path_config: Option<&resolve::PathConfig>,
     target_fn_names: &[String],
-) -> Vec<(String, usize)> {
+) -> Result<Vec<(String, usize)>, XrayError> {
     let mut importers: Vec<(String, usize)> = Vec::new();
+    let mut configs = HashMap::new();
+    let mut php_configs = HashMap::new();
 
     walk_project_files(project_root, &mut |file_path| {
         let Ok(canonical) = file_path.canonicalize() else {
@@ -112,16 +116,30 @@ fn find_importers(
         let sources = parsed.diagnostic_specifiers();
         // Resolve each importer with its own nearest config. Reusing the
         // target package's config breaks aliases across monorepo workspaces.
-        let local_path_config = file_path.parent().and_then(resolve::load_path_config);
+        let directory = file_path.parent().unwrap_or(project_root);
+        let local_path_config = configs
+            .entry(directory.to_path_buf())
+            .or_insert_with(|| resolve::load_path_config(directory));
         let effective_path_config = local_path_config.as_ref().or(path_config);
+        let php_paths = (parsed.language_kind == LanguageKind::Php).then(|| {
+            php_configs
+                .entry(directory.to_path_buf())
+                .or_insert_with(|| resolve::PhpPaths::load(directory))
+        });
 
         for specifier in &sources {
-            let Some(resolved) = resolve_source_specifier(
-                parsed.language_kind,
-                specifier,
-                file_path,
-                effective_path_config,
-            ) else {
+            let resolved = php_paths.as_ref().map_or_else(
+                || {
+                    resolve_source_specifier(
+                        parsed.language_kind,
+                        specifier,
+                        file_path,
+                        effective_path_config,
+                    )
+                },
+                |paths| resolve::resolve_php_import_with_paths(specifier, file_path, paths),
+            );
+            let Some(resolved) = resolved else {
                 continue;
             };
 
@@ -147,10 +165,10 @@ fn find_importers(
                 }
             }
         }
-    });
+    })?;
 
     importers.sort_by(|a, b| a.0.cmp(&b.0));
-    importers
+    Ok(importers)
 }
 
 fn dependency_matches_target(language_kind: LanguageKind, resolved: &Path, target: &Path) -> bool {
@@ -167,6 +185,7 @@ fn dependency_matches_target(language_kind: LanguageKind, resolved: &Path, targe
 /// Directories to skip when walking the project tree.
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
+    "vendor",
     "dist",
     "build",
     "target",
@@ -178,7 +197,78 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 /// Recursively walk supported source files under a directory.
-fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) {
+fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) -> Result<(), XrayError> {
+    // Use Git's ignore semantics, including nested ignore files and untracked
+    // source. NUL-separated names preserve spaces and non-UTF-8 filenames.
+    let listing = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "-z",
+        ])
+        .current_dir(dir)
+        .output();
+    if let Ok(output) = listing {
+        if output.status.success() {
+            let mut paths = BTreeSet::new();
+            for name in output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|name| !name.is_empty())
+            {
+                #[cfg(unix)]
+                let name = {
+                    use std::os::unix::ffi::OsStrExt;
+                    std::ffi::OsStr::from_bytes(name)
+                };
+                #[cfg(not(unix))]
+                let Some(name) = std::str::from_utf8(name).ok().map(std::ffi::OsStr::new) else {
+                    continue;
+                };
+                let relative = Path::new(name);
+                if relative.parent().is_some_and(|parent| {
+                    parent
+                        .components()
+                        .any(|part| should_skip_dir(&part.as_os_str().to_string_lossy()))
+                }) {
+                    continue;
+                }
+                let path = dir.join(relative);
+                if path.is_file()
+                    && !path
+                        .ancestors()
+                        .take_while(|ancestor| *ancestor != dir)
+                        .any(Path::is_symlink)
+                    && path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(lang::is_supported_extension)
+                {
+                    paths.insert(path);
+                }
+            }
+            for path in paths {
+                callback(&path);
+            }
+            return Ok(());
+        }
+    }
+    if dir.join(".git").exists() {
+        return Err(XrayError::ParseFailed(format!(
+            "cannot enumerate Git files in {}; refusing an unfiltered reverse scan",
+            dir.display(),
+        )));
+    }
+    // Non-Git directories are used by the standalone scanner's unit tests.
+    // Production --who resolves the Git root before reaching this function.
+    walk_directory(dir, callback);
+    Ok(())
+}
+
+fn walk_directory(dir: &Path, callback: &mut dyn FnMut(&Path)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -188,6 +278,9 @@ fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) {
 
     for entry in entries.flatten() {
         let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+            continue;
+        }
         if path.is_dir() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -210,7 +303,7 @@ fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) {
         callback(file);
     }
     for dir in &dirs {
-        walk_project_files(dir, callback);
+        walk_directory(dir, callback);
     }
 }
 
@@ -241,6 +334,7 @@ mod tests {
     #[test]
     fn should_skip_dir_skips_node_modules() {
         assert!(should_skip_dir("node_modules"));
+        assert!(should_skip_dir("vendor"));
     }
 
     #[test]
@@ -274,12 +368,95 @@ mod tests {
         walk_project_files(dir.path(), &mut |p| {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap().to_string();
             seen.push(name);
-        });
+        })
+        .unwrap();
 
         assert!(seen.contains(&"main.sql".to_string()));
         assert!(seen.contains(&"main.ts".to_string()));
         assert!(seen.contains(&"main.py".to_string()));
         assert!(seen.contains(&"README.md".to_string()));
+    }
+
+    #[test]
+    fn git_scan_includes_tracked_and_untracked_but_not_ignored_vendor_or_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        fs::create_dir(dir.path().join("vendor")).unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored.php\ntracked.php\n").unwrap();
+        fs::write(dir.path().join("nested/.gitignore"), "hidden.php\n").unwrap();
+        for file in [
+            "tracked.php",
+            "untracked space.php",
+            "ignored.php",
+            "vendor/noise.php",
+            "nested/hidden.php",
+        ] {
+            fs::write(dir.path().join(file), "<?php").unwrap();
+        }
+        assert!(Command::new("git")
+            .args(["add", "-f", "tracked.php"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+        let mut found = Vec::new();
+        walk_project_files(dir.path(), &mut |path| {
+            found.push(path.strip_prefix(dir.path()).unwrap().to_path_buf());
+        })
+        .unwrap();
+        assert_eq!(
+            found,
+            vec![
+                PathBuf::from("tracked.php"),
+                PathBuf::from("untracked space.php")
+            ]
+        );
+    }
+
+    #[test]
+    fn broken_git_index_does_not_fall_back_to_unfiltered_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".git"),
+            "gitdir: /nonexistent/xray-test-repository",
+        )
+        .unwrap();
+        fs::write(dir.path().join("secret.php"), "<?php").unwrap();
+        let mut files = Vec::new();
+        assert!(
+            walk_project_files(dir.path(), &mut |path| files.push(path.to_path_buf())).is_err()
+        );
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn reverse_php_resolves_composer_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("app")).unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+        )
+        .unwrap();
+        let target = dir.path().join("app/Target.php");
+        fs::write(&target, "<?php namespace App; class Target {}").unwrap();
+        fs::write(
+            dir.path().join("app/Consumer.php"),
+            "<?php use App\\Target;",
+        )
+        .unwrap();
+        let importers =
+            find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]).unwrap();
+        assert_eq!(importers.len(), 1);
+        assert!(importers[0].0.ends_with("Consumer.php"));
     }
 
     #[test]
@@ -291,7 +468,8 @@ mod tests {
         fs::write(&target, "SELECT 1;").unwrap();
         fs::write(&importer, "SOURCE child.sql;").unwrap();
 
-        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]);
+        let importers =
+            find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]).unwrap();
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("root.sql"));
         assert_eq!(importers[0].1, 1);
@@ -324,7 +502,7 @@ mod tests {
 
         let cfg = resolve::load_path_config(dir.path()).unwrap();
         let importers =
-            find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]);
+            find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]).unwrap();
 
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("main.ts"));
@@ -356,7 +534,8 @@ mod tests {
         )
         .unwrap();
 
-        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]);
+        let importers =
+            find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]).unwrap();
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("apps/web/page.ts"));
     }
@@ -378,7 +557,8 @@ mod tests {
         )
         .unwrap();
 
-        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]);
+        let importers =
+            find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]).unwrap();
 
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("internal/tools/bash.go"));
@@ -396,7 +576,8 @@ mod tests {
         fs::write(&target, "# Guide").unwrap();
         fs::write(&importer, "[Guide](docs/guide.md#intro)").unwrap();
 
-        let importers = find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]);
+        let importers =
+            find_importers(dir.path(), &target.canonicalize().unwrap(), None, &[]).unwrap();
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("README.md"));
         assert_eq!(importers[0].1, 1);
@@ -425,7 +606,7 @@ mod tests {
 
         let cfg = resolve::load_path_config(dir.path()).unwrap();
         let importers =
-            find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]);
+            find_importers(dir.path(), &target.canonicalize().unwrap(), Some(&cfg), &[]).unwrap();
 
         assert!(importers.is_empty());
     }
@@ -540,7 +721,8 @@ mod tests {
             &target.canonicalize().unwrap(),
             None,
             &target_fn_names,
-        );
+        )
+        .unwrap();
 
         assert_eq!(importers.len(), 1);
         assert!(importers[0].0.ends_with("queries.sql"));
@@ -565,7 +747,8 @@ mod tests {
             &target.canonicalize().unwrap(),
             None,
             &target_fn_names,
-        );
+        )
+        .unwrap();
 
         assert!(importers.is_empty());
     }
@@ -590,7 +773,8 @@ mod tests {
             &target.canonicalize().unwrap(),
             None,
             &target_fn_names,
-        );
+        )
+        .unwrap();
 
         assert!(importers.is_empty());
     }

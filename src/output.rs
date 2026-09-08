@@ -105,6 +105,9 @@ impl FileDigest {
 /// `"class MyService extends Base"` → `"MyService"`
 /// `"public async send(msg: string)"` → `"send"`
 pub(crate) fn extract_name_from_signature(sig: &str) -> String {
+    if let Some(name) = crate::model::php_method_name(sig) {
+        return name.to_string();
+    }
     let mut s = sig
         .trim_start_matches("public ")
         .trim_start_matches("private ")
@@ -378,6 +381,23 @@ mod tests {
     use super::*;
     use crate::lang::LanguageKind;
     use crate::model::{FileContent, FileSummary, FileSummaryKind, Symbol};
+
+    #[test]
+    fn php_method_names_agree_between_json_and_follow_with_final_and_reference_return() {
+        for signature in [
+            "final public method Service::run(): void",
+            "final protected method Service::stop()",
+            "public method &Service::value()",
+        ] {
+            let symbol = make_symbol(signature, vec![]);
+            assert_eq!(extract_name_from_signature(signature), symbol.name());
+            assert_eq!(symbol.kind(), crate::model::SymbolKind::Method);
+            assert!(symbol.name().starts_with("Service::"));
+        }
+        let ordinary = make_symbol("function describe(label = 'a method here')", vec![]);
+        assert_eq!(ordinary.kind(), crate::model::SymbolKind::Function);
+        assert_eq!(ordinary.name(), "describe");
+    }
 
     fn empty_symbols() -> FileSymbols {
         FileSymbols {

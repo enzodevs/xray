@@ -32,12 +32,12 @@ xray --no-follow <file>          # plain: single file digest only
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
 | `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server`, `gopls`, and `svelte-language-server` integration |
-| `reverse.rs` | `--who`: project scanning, find importers (TS + Go + Python + PHP + Rust + SQL + Markdown links) |
+| `reverse.rs` | `--who`: Git-aware source enumeration, directory-scoped config reuse, find importers (TS + Go + Python + PHP + Rust + SQL + Markdown links) |
 | `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::go`, `resolve::py`, `resolve::php`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
 | `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
 | `resolve/go.rs` | Go import resolution: `go.mod` module paths + relative package imports |
 | `resolve/py.rs` | Python import resolution: relative (`.`/`..`) + local project modules/packages |
-| `resolve/php.rs` | PHP import resolution: relative include paths + basic namespace-to-path lookup |
+| `resolve/php.rs` | PHP import resolution: nearest Composer PSR-4 mappings (including dev/array paths), relative includes, and legacy namespace fallback |
 | `resolve/rs.rs` | Rust module resolution: `mod`, `crate::`, `super::`, `self::` paths |
 | `resolve/sql.rs` | SQL include resolution: `resolve_sql_include` (bare + relative paths) |
 | `resolve/markdown.rs` | Markdown link resolution: local relative links + fragment stripping |
@@ -48,7 +48,7 @@ xray --no-follow <file>          # plain: single file digest only
 | `extract/markdown.rs` | Markdown extraction (headings, links, frontmatter, fenced code blocks) |
 | `extract/go.rs` | Go extraction (imports, funcs/methods, vars/consts, structs/interfaces/types, tests, calls) |
 | `extract/python.rs` | Python extraction (imports, public/internal funcs, classes/dataclasses, calls, `__all__`) |
-| `extract/php.rs` | PHP extraction (`use`, include/require, funcs, classes/interfaces/traits/enums, calls) |
+| `extract/php.rs` | PHP extraction (`use`, include/require, funcs, classes/interfaces/traits/enums, owner-qualified methods with visibility/ranges/calls) |
 | `extract/rust.rs` | Rust extraction (use/mod, pub/private fns, structs/enums/traits/impls, derives, tests, calls) |
 | `extract/svelte.rs` | Svelte extraction (template components + `<script>` imports/exports/types/calls via TS backend) |
 | `extract/vue.rs` | Vue extraction (template components/directive calls + `<script>` imports/exports/types/calls via TS backend) |

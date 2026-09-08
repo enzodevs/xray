@@ -111,6 +111,18 @@ xray --no-follow --format json src/app.ts
 
 Run xray from the project or workspace root when you want import resolution, reverse lookup, or LSP tracing. This gives it the right `tsconfig.json`, `go.mod`, and workspace context.
 
+### PHP structure and Composer resolution
+
+PHP classes, interfaces, traits, and enums retain their compact type summaries, and their methods also appear as individual symbols with owner-qualified names (`Class::method`), signatures, one-based line ranges, and extracted calls. Public methods appear under exports; protected/private methods appear under internal. JSON uses the same method names and normalized `method` kind. These are syntax-level visibility groups, not a guarantee that a method is a public package API.
+
+Local namespace resolution reads the nearest `composer.json` without executing PHP or Composer. It supports `autoload` and `autoload-dev` PSR-4 mappings, multiple directories, and longest-prefix precedence. Missing classes under a mapped namespace are unresolved rather than external. Composer classmaps, PSR-0, dependency autoloaders, inherited/dynamically dispatched methods, and PHP cross-file tracing are not implemented. Relative includes and the legacy namespace-path fallback remain available when no PSR-4 mapping matches.
+
+### Reverse lookup scope
+
+`--who` enumerates tracked and untracked non-ignored files with Git, respecting nested `.gitignore` rules. Tracked files remain eligible even if an ignore rule matches them. Dependencies/build directories such as `vendor`, `node_modules`, and `target`, hidden directories, and symlinked paths are excluded. The scan stays within the selected Git repository: run against a file inside a submodule to inspect that submodule, rather than assuming the parent scan includes it. Ignore-file scope is independent of follow-mode `--all`.
+
+TypeScript and Composer configurations are reused per source directory during reverse lookup. Failure to enumerate an established Git root is an error, not permission to perform an unfiltered scan. Reverse lookup remains static import/link discovery, not a complete runtime call graph; large first-party repositories can still take time to parse.
+
 ## Modes
 
 | Goal | Command | What it does |

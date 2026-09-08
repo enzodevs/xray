@@ -87,9 +87,16 @@ impl ProjectGraph {
             }
         }
         let mut resolved = Vec::new();
+        let php_paths = (language == crate::lang::LanguageKind::Php)
+            .then(|| crate::resolve::PhpPaths::load(canonical.parent().unwrap_or(Path::new("."))));
 
         for specifier in specifiers {
-            let candidate = language.resolve_source_specifier(&specifier, &canonical, path_config);
+            let candidate = php_paths.as_ref().map_or_else(
+                || language.resolve_source_specifier(&specifier, &canonical, path_config),
+                |paths| {
+                    crate::resolve::resolve_php_import_with_paths(&specifier, &canonical, paths)
+                },
+            );
             let status = if let Some(candidate) = candidate {
                 if let Ok(candidate) = candidate.canonicalize() {
                     if !resolved.contains(&candidate) {
@@ -99,7 +106,11 @@ impl ProjectGraph {
                 } else {
                     ResolutionStatus::Unresolved
                 }
-            } else if is_external_specifier(language, &specifier, path_config) {
+            } else if is_external_specifier(language, &specifier, path_config)
+                && !php_paths
+                    .as_ref()
+                    .is_some_and(|paths| paths.matches(&specifier))
+            {
                 ResolutionStatus::External
             } else {
                 ResolutionStatus::Unresolved
@@ -204,5 +215,28 @@ mod tests {
         assert_eq!(stats.external, 1);
         assert_eq!(stats.unresolved, 1);
         assert_eq!(stats.resolved, 0);
+    }
+
+    #[test]
+    fn php_diagnostics_distinguish_missing_local_class_from_external_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("app")).unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("app/Present.php"), "<?php class Present {}").unwrap();
+        let entry = dir.path().join("app/Entry.php");
+        fs::write(
+            &entry,
+            "<?php use App\\Present; use App\\Missing; use Vendor\\Remote;",
+        )
+        .unwrap();
+        let mut graph = ProjectGraph::new();
+        assert_eq!(graph.dependencies(&entry, None).unwrap().len(), 1);
+        assert_eq!(graph.stats().resolved, 1);
+        assert_eq!(graph.stats().unresolved, 1);
+        assert_eq!(graph.stats().external, 1);
     }
 }

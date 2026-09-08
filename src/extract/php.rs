@@ -33,6 +33,7 @@ fn collect_top_level(root: Node, src: &[u8], symbols: &mut FileSymbols) {
                 if let Some(ty) = extract_type(node, src) {
                     symbols.types.push(ty);
                 }
+                extract_methods(node, src, symbols);
             }
             "const_declaration" => extract_const(node, src, symbols),
             "namespace_definition" => collect_namespace(node, src, symbols),
@@ -59,6 +60,7 @@ fn collect_namespace(node: Node, src: &[u8], symbols: &mut FileSymbols) {
                 if let Some(ty) = extract_type(child, src) {
                     symbols.types.push(ty);
                 }
+                extract_methods(child, src, symbols);
             }
             "const_declaration" => extract_const(child, src, symbols),
             _ => {}
@@ -186,6 +188,74 @@ fn extract_type(node: Node, src: &[u8]) -> Option<TypeDef> {
         line_end: node.end_position().row + 1,
         exported: true,
     })
+}
+
+fn extract_methods(node: Node, src: &[u8], symbols: &mut FileSymbols) {
+    let (Some(owner), Some(body)) = (
+        node.child_by_field_name("name"),
+        node.child_by_field_name("body"),
+    ) else {
+        return;
+    };
+    let mut cursor = body.walk();
+    for method in body.children(&mut cursor) {
+        if method.kind() != "method_declaration" {
+            continue;
+        }
+        let Some(name) = method.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(mut symbol) = extract_function(method, src) else {
+            continue;
+        };
+        let mut modifiers = Vec::new();
+        let mut method_cursor = method.walk();
+        for child in method.children(&mut method_cursor) {
+            if matches!(
+                child.kind(),
+                "visibility_modifier" | "static_modifier" | "final_modifier" | "abstract_modifier"
+            ) {
+                modifiers.push(txt(child, src).to_ascii_lowercase());
+            }
+        }
+        let end = method
+            .child_by_field_name("body")
+            .map_or_else(|| method.end_byte(), |body| body.start_byte());
+        let tail = collapse_whitespace(
+            String::from_utf8_lossy(&src[name.end_byte()..end])
+                .trim()
+                .trim_end_matches(';'),
+        );
+        symbol.signature = format!(
+            "{}method {}{}::{}{tail}",
+            if modifiers.is_empty() {
+                String::new()
+            } else {
+                format!("{} ", modifiers.join(" "))
+            },
+            if src[method.start_byte()..name.start_byte()]
+                .iter()
+                .rev()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                == Some(b'&')
+            {
+                "&"
+            } else {
+                ""
+            },
+            txt(owner, src),
+            txt(name, src),
+        );
+        if modifiers
+            .iter()
+            .any(|m| matches!(m.as_str(), "private" | "protected"))
+        {
+            symbols.internals.push(symbol);
+        } else {
+            symbols.exports.push(symbol);
+        }
+    }
 }
 
 fn extract_const(node: Node, src: &[u8], symbols: &mut FileSymbols) {
@@ -476,7 +546,7 @@ mod tests {
             vec!["App\\Services\\UserService".to_string()]
         );
         assert_eq!(symbols.import_bindings[0].local_name, "Users");
-        assert_eq!(symbols.exports.len(), 2);
+        assert_eq!(symbols.exports.len(), 3);
         assert_eq!(symbols.exports[0].signature, "const LIMIT");
         assert!(symbols.exports[1].signature.starts_with("function handle"));
         assert_eq!(
@@ -487,5 +557,60 @@ mod tests {
         assert_eq!(symbols.types[0].kind, "class");
         assert_eq!(symbols.types[0].extends, "BaseController, Routable");
         assert_eq!(symbols.types[0].summary, "{name, index}");
+        assert_eq!(
+            symbols.exports[2].signature,
+            "public method Controller::index()"
+        );
+        assert_eq!(symbols.exports[2].calls, vec!["handle"]);
+    }
+
+    #[test]
+    fn methods_retain_owner_visibility_ranges_and_calls() {
+        let src = b"<?php\nnamespace App {\nclass First {\n public function run(int $id): string { return $this->load($id); }\n protected function load($id) { return trim($id); }\n private static function secret() {}\n}\ninterface Second { public function run(): string; }\ntrait Shared { function helper() { return strlen('x'); } }\nenum State { case Ready; public function label() { return 'ready'; } }\n}";
+        let tree = parse_php(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.exports.len(), 4);
+        assert_eq!(symbols.internals.len(), 2);
+        let run = &symbols.exports[0];
+        assert_eq!(run.name(), "First::run");
+        assert_eq!(run.kind(), crate::model::SymbolKind::Method);
+        assert_eq!((run.line_start, run.line_end), (4, 4));
+        assert_eq!(run.calls, vec!["load"]);
+        assert_eq!(symbols.exports[1].name(), "Second::run");
+        assert_eq!(symbols.exports[2].name(), "Shared::helper");
+        assert_eq!(symbols.exports[3].name(), "State::label");
+        assert_eq!(symbols.internals[0].calls, vec!["trim"]);
+        assert!(symbols.internals[1]
+            .signature
+            .starts_with("private static method"));
+    }
+
+    #[test]
+    fn final_reference_returning_method_preserves_signature_and_json_name() {
+        let src =
+            b"<?php class Box { final public function &value(): mixed { return $this->value; } }";
+        let tree = parse_php(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(
+            symbols.exports[0].signature,
+            "final public method &Box::value(): mixed"
+        );
+        assert_eq!(symbols.exports[0].name(), "Box::value");
+    }
+
+    #[test]
+    fn php_modifier_case_does_not_change_visibility_or_method_identity() {
+        let src = b"<?php class Box { PRIVATE FUNCTION Secret() {} FiNaL PuBlIc FUNCTION Run() {} PROTECTED FUNCTION Hidden() {} }";
+        let tree = parse_php(src);
+        let symbols = extract_symbols(tree.root_node(), src);
+        assert_eq!(symbols.exports.len(), 1);
+        assert_eq!(symbols.exports[0].name(), "Box::Run");
+        assert_eq!(
+            symbols.exports[0].signature,
+            "final public method Box::Run()"
+        );
+        assert_eq!(symbols.internals.len(), 2);
+        assert_eq!(symbols.internals[0].name(), "Box::Secret");
+        assert_eq!(symbols.internals[1].name(), "Box::Hidden");
     }
 }

@@ -133,6 +133,33 @@ impl From<&str> for Reference {
     }
 }
 
+/// PHP method markers are declaration prefixes, never text inside arguments.
+pub(crate) fn php_method_name(signature: &str) -> Option<&str> {
+    let mut value = signature.trim_start();
+    loop {
+        let prefix = [
+            "public ",
+            "private ",
+            "protected ",
+            "static ",
+            "abstract ",
+            "final ",
+        ]
+        .into_iter()
+        .find(|prefix| value.starts_with(prefix));
+        if let Some(prefix) = prefix {
+            value = value.strip_prefix(prefix)?.trim_start();
+        } else {
+            break;
+        }
+    }
+    value
+        .strip_prefix("method ")?
+        .trim_start_matches('&')
+        .split(['(', ' '])
+        .next()
+}
+
 fn symbol_kind_from_signature(signature: &str, is_component: bool) -> SymbolKind {
     if is_component {
         return SymbolKind::Component;
@@ -158,7 +185,7 @@ fn symbol_kind_from_signature(signature: &str, is_component: bool) -> SymbolKind
         .any(|prefix| lower.starts_with(prefix))
     {
         SymbolKind::Variable
-    } else if lower.starts_with("func (") {
+    } else if lower.starts_with("func (") || php_method_name(signature).is_some() {
         SymbolKind::Method
     } else if ["fn ", "func ", "function ", "def "]
         .iter()
@@ -173,6 +200,9 @@ fn symbol_kind_from_signature(signature: &str, is_component: bool) -> SymbolKind
 }
 
 fn symbol_name_from_signature(signature: &str) -> String {
+    if let Some(name) = php_method_name(signature) {
+        return name.to_string();
+    }
     let mut value = signature.trim();
     let words: Vec<&str> = value.split_whitespace().collect();
     let sql_name_index = match words.as_slice() {
