@@ -244,6 +244,17 @@ xray --trace --lsp -s run src/feature.ts  # follow the behavior
 
 Then open the exact ranges reported by xray.
 
+## Stress testing and known limits
+
+The [real-project stress report](docs/stress-test-2026-09-08.md) covers 1,057 files across nine project collections, including large compiler fixtures. A repeatable runner is available:
+
+```sh
+python3 scripts/stress_xray.py --binary target/release/xray \
+  --output /tmp/xray-stress-new /path/to/project /path/to/oss-snapshot
+```
+
+Compression depends on the input and output mode; JSON and followed dependencies can be much larger than a plain digest. Passing the stress runner checks execution and basic JSON invariants, not semantic completeness. TS-family digests filter many external imports, Rust public re-exports are not a complete API inventory, and returned anonymous handlers are not modeled as separate trace roots. LSP definition containment can also create false call edges (for example, a React setter mapped to its enclosing component); verify important edges in source. LSP requests currently have no internal deadline, so use an external timeout for unattended runs. `--who` requires Git metadata; downloaded snapshots without it are unsupported.
+
 ## License
 
 [MIT](LICENSE)
