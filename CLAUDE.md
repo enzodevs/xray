@@ -69,14 +69,14 @@ xray --no-follow <file>          # plain: single file digest only
 - **Lints**: `clippy::all = deny`, `clippy::pedantic = warn` (see Cargo.toml)
 - **Errors**: `thiserror` only. No `unwrap()`/`expect()` outside tests
 - **Tests**: Descriptive names, one behavior per test. Use `parse_ts()` / `parse_tsx()` / `parse_rs()` helpers
-- **tree-sitter v0.23 gotchas**:
+- **tree-sitter-typescript v0.23 gotchas** (runtime: tree-sitter v0.27):
   - Enum members are `property_identifier`, not `enum_member`
   - JSX tag name: `child_by_field_name("name")`, NOT `child(0)`
   - Function expressions in args: `function_expression` node kind
   - `namespace` → wrapped in `expression_statement` > `internal_module`
   - `declare module` → wrapped in `ambient_declaration` > `module`
   - Decorators: accessed via `children_by_field_name("decorator")`; `named_child(0)` gives the expression after `@`
-- **tree-sitter-rust v0.23 gotchas**:
+- **tree-sitter-rust v0.24 gotchas**:
   - Attributes (`#[...]`) are sibling `attribute_item` nodes, not children of the decorated item
   - `visibility_modifier` is a child node (first named child), not a keyword token
   - `impl Trait for Type` has two `type_identifier` children: trait first, type second
