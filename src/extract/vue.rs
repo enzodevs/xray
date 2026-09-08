@@ -247,7 +247,7 @@ fn extract_component_symbol(root: Node, src: &[u8]) -> Option<Symbol> {
     Some(Symbol {
         signature: "default component".to_string(),
         line_start: 1,
-        line_end: root.end_position().row + 1,
+        line_end: String::from_utf8_lossy(src).lines().count(),
         calls,
         is_component: true,
         renders,
@@ -714,6 +714,40 @@ function submit() {
         assert!(component.calls.contains(&"submit".to_string()));
         assert!(component.calls.contains(&"iconForPrompt".to_string()));
         assert!(component.calls.contains(&"cn".to_string()));
+    }
+
+    #[test]
+    fn component_end_line_excludes_trailing_empty_line() {
+        let src = "<template><Widget /></template>\n";
+        let tree = parse_vue(src);
+        let symbols = extract_symbols_from_vue(tree.root_node(), src.as_bytes());
+        let component = symbols
+            .exports
+            .iter()
+            .find(|symbol| symbol.signature == "default component")
+            .expect("component symbol");
+
+        assert_eq!(component.line_end, 1);
+    }
+
+    #[test]
+    fn component_end_line_includes_unterminated_final_line() {
+        let src = "<template>\n<Widget />\n</template>";
+        let tree = parse_vue(src);
+        let symbols = extract_symbols_from_vue(tree.root_node(), src.as_bytes());
+        let component = symbols
+            .exports
+            .iter()
+            .find(|symbol| symbol.signature == "default component")
+            .expect("component symbol");
+
+        assert_eq!(component.line_end, 3);
+    }
+
+    #[test]
+    fn empty_source_has_no_component() {
+        let tree = parse_vue("");
+        assert!(extract_symbols_from_vue(tree.root_node(), b"").exports.is_empty());
     }
 
     #[test]

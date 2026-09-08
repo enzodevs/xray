@@ -194,8 +194,8 @@ pub fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
 /// traceable internals. They remain listed as handlers on React components,
 /// but can now also be selected directly with `--trace -s NAME`.
 fn extract_nested_functions(root: Node, src: &[u8], internals: &mut Vec<Symbol>) {
-    fn walk(node: Node, src: &[u8], internals: &mut Vec<Symbol>) {
-        if has_function_ancestor(node) {
+    fn walk(node: Node, src: &[u8], internals: &mut Vec<Symbol>, inside_function: bool) {
+        if inside_function {
             let symbol = match node.kind() {
                 "function_declaration" => extract_function(node, src),
                 "variable_declarator"
@@ -212,31 +212,24 @@ fn extract_nested_functions(root: Node, src: &[u8], internals: &mut Vec<Symbol>)
             }
         }
 
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, src, internals);
-        }
-    }
-
-    fn has_function_ancestor(node: Node) -> bool {
-        let mut parent = node.parent();
-        while let Some(current) = parent {
-            if matches!(
-                current.kind(),
+        // Carry ancestor state down once. Repeated Node::parent() lookup is
+        // costly on wide trees (for example compiler fixtures full of comments).
+        let inside_function = inside_function
+            || matches!(
+                node.kind(),
                 "arrow_function"
                     | "function"
                     | "function_declaration"
                     | "function_expression"
                     | "method_definition"
-            ) {
-                return true;
-            }
-            parent = current.parent();
+            );
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk(child, src, internals, inside_function);
         }
-        false
     }
 
-    walk(root, src, internals);
+    walk(root, src, internals, false);
 }
 
 // ── Imports ──
@@ -989,6 +982,16 @@ mod tests {
             .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .unwrap();
         parser.parse(src, None).unwrap()
+    }
+
+    #[test]
+    fn nested_function_walk_preserves_scope_across_wide_siblings() {
+        let mut src = "// compiler fixture\n".repeat(10_000);
+        src.push_str("function outer() { function inner() {} const arrow = () => {}; }\nfunction sibling() {}\n");
+        let tree = parse_ts(src.as_bytes());
+        let symbols = extract_symbols(tree.root_node(), src.as_bytes());
+        let names: Vec<_> = symbols.internals.iter().map(Symbol::name).collect();
+        assert_eq!(names, ["outer", "sibling", "inner", "arrow"]);
     }
 
     // ── Basic extraction ──

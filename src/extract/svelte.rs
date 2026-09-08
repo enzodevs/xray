@@ -272,7 +272,7 @@ fn extract_component_symbol(root: Node, src: &[u8]) -> Option<Symbol> {
     Some(Symbol {
         signature: "default component".to_string(),
         line_start: 1,
-        line_end: root.end_position().row + 1,
+        line_end: String::from_utf8_lossy(src).lines().count(),
         calls,
         is_component: true,
         renders,
@@ -622,6 +622,40 @@ mod tests {
         assert_eq!(component.renders[0].children[0].name, "Avatar");
         assert!(component.calls.contains(&"avatarFor".to_string()));
         assert!(component.calls.contains(&"visible".to_string()));
+    }
+
+    #[test]
+    fn component_end_line_excludes_trailing_empty_line() {
+        let src = b"<Widget />\n";
+        let tree = parse_svelte(src);
+        let symbols = extract_symbols_from_svelte(tree.root_node(), src);
+        let component = symbols
+            .exports
+            .iter()
+            .find(|symbol| symbol.signature == "default component")
+            .expect("component symbol");
+
+        assert_eq!(component.line_end, 1);
+    }
+
+    #[test]
+    fn component_end_line_includes_unterminated_final_line() {
+        let src = b"<Widget>\n<Child />\n</Widget>";
+        let tree = parse_svelte(src);
+        let symbols = extract_symbols_from_svelte(tree.root_node(), src);
+        let component = symbols
+            .exports
+            .iter()
+            .find(|symbol| symbol.signature == "default component")
+            .expect("component symbol");
+
+        assert_eq!(component.line_end, 3);
+    }
+
+    #[test]
+    fn empty_source_has_no_component() {
+        let tree = parse_svelte(b"");
+        assert!(extract_symbols_from_svelte(tree.root_node(), b"").exports.is_empty());
     }
 
     #[test]
