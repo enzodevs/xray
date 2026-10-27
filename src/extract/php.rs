@@ -1,3 +1,9 @@
+mod dependencies;
+mod structure;
+
+#[cfg(test)]
+mod regression;
+
 use tree_sitter::Node;
 
 use crate::model::{FileSymbols, ImportBinding, Symbol, TypeDef};
@@ -5,13 +11,15 @@ use crate::util::{trim_quotes, txt};
 
 pub(super) fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
     let mut symbols = super::empty_symbols();
+    dependencies::collect(root, src, &mut symbols);
     collect_top_level(root, src, &mut symbols);
+    structure::collect(root, src, &mut symbols);
     symbols
 }
 
 pub(super) fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     let mut symbols = super::empty_symbols();
-    collect_imports_recursive(root, src, &mut symbols);
+    dependencies::collect(root, src, &mut symbols);
     symbols.imports
 }
 
@@ -19,8 +27,6 @@ fn collect_top_level(root: Node, src: &[u8], symbols: &mut FileSymbols) {
     let mut cursor = root.walk();
     for node in root.children(&mut cursor) {
         match node.kind() {
-            "namespace_use_declaration" => extract_namespace_use(node, src, symbols),
-            "expression_statement" => collect_imports_recursive(node, src, symbols),
             "function_definition" => {
                 if let Some(symbol) = extract_function(node, src) {
                     symbols.exports.push(symbol);
@@ -47,7 +53,6 @@ fn collect_namespace(node: Node, src: &[u8], symbols: &mut FileSymbols) {
     for child in node.children(&mut cursor) {
         match child.kind() {
             "compound_statement" => collect_top_level(child, src, symbols),
-            "namespace_use_declaration" => extract_namespace_use(child, src, symbols),
             "function_definition" => {
                 if let Some(symbol) = extract_function(child, src) {
                     symbols.exports.push(symbol);
@@ -295,12 +300,22 @@ fn extract_calls(body: Option<Node>, src: &[u8]) -> Vec<String> {
 }
 
 fn collect_calls_recursive(node: Node, src: &[u8], calls: &mut Vec<String>) {
+    // Deferred callback bodies are not calls made by the enclosing function.
+    if structure::is_closure(node)
+        || matches!(node.kind(), "function_definition" | "method_declaration")
+    {
+        return;
+    }
     if let Some(name) = call_name(node, src) {
         push_unique(calls, name);
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
+        // Anonymous-class constructor arguments execute now; its methods do not.
+        if node.kind() == "anonymous_class" && node.child_by_field_name("body") == Some(child) {
+            continue;
+        }
         collect_calls_recursive(child, src, calls);
     }
 }
@@ -437,8 +452,7 @@ fn collect_attributes(node: Node, src: &[u8], out: &mut Vec<String>) {
 fn literal_child_text(node: Node, src: &[u8]) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if matches!(child.kind(), "string" | "encapsed_string") {
-            let value = trim_quotes(txt(child, src).trim()).to_string();
+        if let Some(value) = structure::literal(child, src) {
             if !value.is_empty() {
                 return Some(value);
             }
@@ -492,7 +506,7 @@ fn push_unique(list: &mut Vec<String>, value: String) {
 mod tests {
     use super::*;
 
-    fn parse_php(src: &[u8]) -> tree_sitter::Tree {
+    pub(super) fn parse_php(src: &[u8]) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
@@ -543,7 +557,12 @@ mod tests {
 
         assert_eq!(
             symbols.imports,
-            vec!["App\\Services\\UserService".to_string()]
+            vec![
+                "App\\Services\\UserService",
+                "App\\Http\\Response",
+                "App\\Http\\BaseController",
+                "App\\Http\\Routable"
+            ]
         );
         assert_eq!(symbols.import_bindings[0].local_name, "Users");
         assert_eq!(symbols.exports.len(), 3);
@@ -580,9 +599,11 @@ mod tests {
         assert_eq!(symbols.exports[2].name(), "Shared::helper");
         assert_eq!(symbols.exports[3].name(), "State::label");
         assert_eq!(symbols.internals[0].calls, vec!["trim"]);
-        assert!(symbols.internals[1]
-            .signature
-            .starts_with("private static method"));
+        assert!(
+            symbols.internals[1]
+                .signature
+                .starts_with("private static method")
+        );
     }
 
     #[test]
