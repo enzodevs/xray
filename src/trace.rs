@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::XrayError;
@@ -80,8 +81,14 @@ enum CallTarget {
     },
 }
 
-/// Run trace mode: full digest + call tree for selected symbols.
+/// Compatibility entry point for the existing CLI; bounded-output callers use `render`.
 pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
+    print!("{}", render(entry_path, config)?);
+    Ok(())
+}
+
+/// Render trace mode: full digest + call tree for selected symbols.
+pub fn render(entry_path: &str, config: &TraceConfig) -> Result<String, XrayError> {
     let entry = std::fs::canonicalize(Path::new(entry_path)).map_err(|e| XrayError::Io {
         path: entry_path.to_string(),
         source: e,
@@ -97,54 +104,53 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
     let mut lsp = if config.use_lsp {
         let fallback_dir = entry.parent().unwrap_or(Path::new("."));
         let root = util::git_root(fallback_dir).unwrap_or_else(|| fallback_dir.to_path_buf());
-        match LspClient::start(&root, digest.language_kind) {
-            Ok(mut client) => {
-                // Resolve imported file paths so the LSP can eagerly load
-                // their type graphs (needed for member call resolution).
-                let mut import_paths: Vec<PathBuf> = Vec::new();
-                let mut seen_sources = HashSet::new();
-                for binding in &entry_symbols.import_bindings {
-                    if seen_sources.insert(&binding.source) {
-                        if let Some(resolved) = digest.language_kind.resolve_source_specifier(
-                            &binding.source,
-                            &entry,
-                            path_config.as_ref(),
-                        ) {
-                            import_paths.push(resolved);
-                        }
+        {
+            let mut client = LspClient::start(&root, digest.language_kind)?;
+            // Resolve imported file paths so the LSP can eagerly load
+            // their type graphs (needed for member call resolution).
+            let mut import_paths: Vec<PathBuf> = Vec::new();
+            let mut seen_sources = HashSet::new();
+            for binding in &entry_symbols.import_bindings {
+                if seen_sources.insert(&binding.source) {
+                    if let Some(resolved) = digest.language_kind.resolve_source_specifier(
+                        &binding.source,
+                        &entry,
+                        path_config.as_ref(),
+                    ) {
+                        import_paths.push(resolved);
                     }
                 }
-                client.warm_up(&entry, &import_paths);
-                Some(client)
             }
-            Err(e) => {
-                eprintln!("xray: LSP init failed: {e}");
-                None
-            }
+            client.warm_up(&entry, &import_paths);
+            Some(client)
         }
     } else {
         None
     };
 
-    print!("{digest}");
+    let mut rendered = digest.to_string();
 
     let symbols = select_symbols(entry_symbols, config.target_symbol.as_deref());
     if symbols.is_empty() {
-        if let Some(name) = &config.target_symbol {
-            eprintln!("xray: symbol '{name}' not found");
-        }
         if let Some(client) = lsp {
             client.shutdown();
         }
-        return Ok(());
+        if let Some(name) = &config.target_symbol {
+            return Err(XrayError::Lsp(format!("trace symbol '{name}' not found")));
+        }
+        return Ok(rendered);
     }
 
     for sym in symbols {
         let name = output::extract_name_from_signature(&sym.signature);
-        println!("trace: {}  [L{}-{}]", name, sym.line_start, sym.line_end);
+        let _ = writeln!(
+            rendered,
+            "trace: {}  [L{}-{}]",
+            name, sym.line_start, sym.line_end
+        );
 
         if sym.calls.is_empty() {
-            println!("  (no calls)");
+            rendered.push_str("  (no calls)\n");
         } else {
             let mut visited = HashSet::new();
             visited.insert((entry.clone(), name.clone()));
@@ -163,18 +169,18 @@ pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
             );
 
             if !children.is_empty() {
-                println!("│");
-                render_call_tree(&children, "");
+                rendered.push_str("│\n");
+                render_call_tree(&children, "", &mut rendered);
             }
         }
-        println!();
+        rendered.push('\n');
     }
 
     if let Some(client) = lsp {
         client.shutdown();
     }
 
-    Ok(())
+    Ok(rendered)
 }
 
 fn validate_trace_capabilities(
@@ -567,7 +573,6 @@ fn build_imported_node(
 /// definition, and if found, builds a call node that continues the trace.
 // Params carry the full traversal state needed to continue the trace.
 #[expect(clippy::too_many_arguments)]
-#[expect(clippy::too_many_lines)]
 fn try_lsp_resolve(
     call_name: &str,
     file_path: &Path,
@@ -615,12 +620,7 @@ fn try_lsp_resolve(
                 })
         })?;
 
-    // Retry with short delay: tsserver may need time to resolve
-    // user-defined types from imported modules (built-ins resolve immediately).
-    let (target_path, target_line_0) = lsp.definition(file_path, line_0, col_0).or_else(|| {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        lsp.definition(file_path, line_0, col_0)
-    })?;
+    let (target_path, target_line_0) = lsp.definition(file_path, line_0, col_0)?;
 
     let canonical_target = std::fs::canonicalize(&target_path).unwrap_or(target_path.clone());
     let canonical_source = std::fs::canonicalize(file_path).unwrap_or(file_path.to_path_buf());
@@ -632,7 +632,7 @@ fn try_lsp_resolve(
     if canonical_target == canonical_source {
         let digest = FileDigest::from_path(&canonical_source).ok()?;
         let symbols = digest.code_symbols()?;
-        let sym = find_symbol_at_line(symbols, target_line_1)?;
+        let sym = find_definition_symbol(symbols, target_line_1, method)?;
         let children = if depth < config.max_depth
             && !sym.calls.is_empty()
             && visited.insert((canonical_source.clone(), call_name.to_string()))
@@ -669,7 +669,7 @@ fn try_lsp_resolve(
     let display_path = util::relative_path(&canonical_target);
     let symbols = digest.code_symbols()?;
 
-    let sym = find_symbol_at_line(symbols, target_line_1);
+    let sym = find_definition_symbol(symbols, target_line_1, method);
 
     let (lines, children) = if let Some(s) = sym {
         let sub = if depth < config.max_depth
@@ -706,6 +706,18 @@ fn try_lsp_resolve(
     })
 }
 
+/// Only traverse a declaration matching the called member, never an enclosing class.
+fn find_definition_symbol<'a>(
+    symbols: &'a FileSymbols,
+    line: usize,
+    method: &str,
+) -> Option<&'a Symbol> {
+    let symbol = find_symbol_at_line(symbols, line)?;
+    let name = output::extract_name_from_signature(&symbol.signature);
+    let member = name.rsplit([':', '.']).next()?;
+    (member == method && symbol.line_start == line).then_some(symbol)
+}
+
 /// Find the symbol whose line range contains the given line.
 /// Prefers the narrowest (most specific) match.
 fn find_symbol_at_line(symbols: &FileSymbols, line: usize) -> Option<&Symbol> {
@@ -718,7 +730,7 @@ fn find_symbol_at_line(symbols: &FileSymbols, line: usize) -> Option<&Symbol> {
 }
 
 /// Render the call tree with box-drawing characters.
-fn render_call_tree(nodes: &[CallNode], prefix: &str) {
+fn render_call_tree(nodes: &[CallNode], prefix: &str, rendered: &mut String) {
     for (i, node) in nodes.iter().enumerate() {
         let is_last = i == nodes.len() - 1;
         let connector = if is_last { "└── " } else { "├── " };
@@ -726,7 +738,8 @@ fn render_call_tree(nodes: &[CallNode], prefix: &str) {
 
         match &node.location {
             CallLocation::Local { lines, .. } => {
-                println!(
+                let _ = writeln!(
+                    rendered,
                     "{prefix}{connector}{}  (local)  [L{}-{}]",
                     node.call_name, lines.0, lines.1
                 );
@@ -737,25 +750,31 @@ fn render_call_tree(nodes: &[CallNode], prefix: &str) {
                 ..
             } => {
                 if lines.0 > 0 {
-                    println!(
+                    let _ = writeln!(
+                        rendered,
                         "{prefix}{connector}{}  \u{2190}  {}  [L{}-{}]",
                         node.call_name, display_path, lines.0, lines.1
                     );
                 } else {
-                    println!(
+                    let _ = writeln!(
+                        rendered,
                         "{prefix}{connector}{}  \u{2190}  {}",
                         node.call_name, display_path
                     );
                 }
             }
             CallLocation::Unresolved { reason } => {
-                println!("{prefix}{connector}{}  ({})", node.call_name, reason);
+                let _ = writeln!(
+                    rendered,
+                    "{prefix}{connector}{}  ({})",
+                    node.call_name, reason
+                );
             }
         }
 
         if !node.children.is_empty() {
             let sub_prefix = format!("{prefix}{continuation}");
-            render_call_tree(&node.children, &sub_prefix);
+            render_call_tree(&node.children, &sub_prefix, rendered);
         }
     }
 }
@@ -1206,6 +1225,15 @@ mod tests {
             handlers: Vec::new(),
             decorators: Vec::new(),
         }
+    }
+
+    #[test]
+    fn definition_mapping_rejects_enclosing_function_even_with_matching_name() {
+        let mut symbols = empty_symbols();
+        symbols.exports.push(make_symbol("target", vec![]));
+        assert!(find_definition_symbol(&symbols, 5, "target").is_none());
+        assert!(find_definition_symbol(&symbols, 1, "target").is_some());
+        assert!(find_definition_symbol(&symbols, 1, "other").is_none());
     }
 
     #[test]

@@ -8,8 +8,10 @@ mod error;
 mod extract;
 mod follow;
 mod lang;
+#[cfg_attr(not(unix), path = "lsp_unsupported.rs")]
 mod lsp;
 mod model;
+pub mod navigation;
 mod output;
 mod parser;
 mod project;
@@ -147,6 +149,20 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().is_some_and(|arg| arg == "--lsp-worker") {
+        let result = if raw.len() == 2 {
+            navigation::run_worker(Path::new(&raw[1]))
+        } else {
+            Err(XrayError::Lsp(
+                "internal worker requires one workspace root".into(),
+            ))
+        };
+        if let Err(error) = result {
+            eprintln!("xray: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if raw.is_empty() || raw.iter().any(|arg| arg == "-h" || arg == "--help") {
         print_help();
