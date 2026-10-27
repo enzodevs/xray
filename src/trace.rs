@@ -81,12 +81,6 @@ enum CallTarget {
     },
 }
 
-/// Compatibility entry point for the existing CLI; bounded-output callers use `render`.
-pub fn run(entry_path: &str, config: &TraceConfig) -> Result<(), XrayError> {
-    print!("{}", render(entry_path, config)?);
-    Ok(())
-}
-
 /// Render trace mode: full digest + call tree for selected symbols.
 pub fn render(entry_path: &str, config: &TraceConfig) -> Result<String, XrayError> {
     let entry = std::fs::canonicalize(Path::new(entry_path)).map_err(|e| XrayError::Io {
@@ -99,7 +93,11 @@ pub fn render(entry_path: &str, config: &TraceConfig) -> Result<String, XrayErro
     let Some(entry_symbols) = digest.code_symbols() else {
         return Err(XrayError::ParseFailed(entry.display().to_string()));
     };
-    let path_config = entry.parent().and_then(resolve::load_path_config);
+    let path_config = if digest.language_kind.uses_ts_path_config() {
+        entry.parent().and_then(resolve::load_path_config)
+    } else {
+        None
+    };
 
     let mut lsp = if config.use_lsp {
         let fallback_dir = entry.parent().unwrap_or(Path::new("."));
@@ -933,7 +931,7 @@ mod tests {
         std::fs::write(&file, "select 1;").unwrap();
 
         let cfg = default_trace_config();
-        let err = run(file.to_str().unwrap(), &cfg).unwrap_err();
+        let err = render(file.to_str().unwrap(), &cfg).unwrap_err();
 
         match err {
             XrayError::UnsupportedFeature { feature, language } => {
@@ -951,7 +949,7 @@ mod tests {
         std::fs::write(&file, "def run():\n    return 1").unwrap();
 
         let cfg = default_trace_config();
-        let err = run(file.to_str().unwrap(), &cfg).unwrap_err();
+        let err = render(file.to_str().unwrap(), &cfg).unwrap_err();
 
         match err {
             XrayError::UnsupportedFeature { feature, language } => {
@@ -969,7 +967,7 @@ mod tests {
         std::fs::write(&file, "# Docs").unwrap();
 
         let cfg = default_trace_config();
-        let err = run(file.to_str().unwrap(), &cfg).unwrap_err();
+        let err = render(file.to_str().unwrap(), &cfg).unwrap_err();
 
         match err {
             XrayError::UnsupportedFeature { feature, language } => {

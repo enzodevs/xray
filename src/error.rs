@@ -21,4 +21,7 @@ pub enum XrayError {
 
     #[error("lsp: {0}")]
     Lsp(String),
+
+    #[error("output: {0}")]
+    Output(String),
 }

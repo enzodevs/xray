@@ -68,6 +68,11 @@ pub fn parse_file(path: &Path) -> Result<ParsedFile, XrayError> {
 }
 
 impl ParsedFile {
+    /// Recovery is useful for navigation, but must never look like a clean parse.
+    pub fn has_syntax_errors(&self) -> bool {
+        matches!(&self.content, ParsedContent::Code(tree) if tree.root_node().has_error())
+    }
+
     pub fn extract_content(&self) -> crate::model::FileContent {
         match &self.content {
             ParsedContent::Code(tree) => crate::model::FileContent::Code(

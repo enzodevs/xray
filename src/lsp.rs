@@ -19,7 +19,7 @@ pub(crate) fn failure(message: impl Into<String>) -> XrayError {
 }
 
 /// An exact LSP location, with zero-based UTF-16 positions.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Location {
     pub file: PathBuf,
     pub line: usize,
@@ -38,6 +38,7 @@ pub struct LspClient {
     next_id: u64,
     opened_files: HashMap<PathBuf, (i64, String)>,
     capabilities: Value,
+    configuration: Value,
     progress: std::collections::HashSet<String>,
     index_tokens: std::collections::HashSet<String>,
     pub(crate) index_completed: bool,
@@ -93,6 +94,7 @@ impl LspClient {
             next_id: 1,
             opened_files: HashMap::new(),
             capabilities: Value::Null,
+            configuration: storage.map_or(Value::Null, |_| php_configuration()),
             progress: std::collections::HashSet::new(),
             index_tokens: std::collections::HashSet::new(),
             index_completed: false,
@@ -130,6 +132,12 @@ impl LspClient {
             }
         }
         client.notify("initialized", &json!({}))?;
+        if !client.configuration.is_null() {
+            client.notify(
+                "workspace/didChangeConfiguration",
+                &json!({"settings":client.configuration}),
+            )?;
+        }
         Ok(client)
     }
 
@@ -157,14 +165,47 @@ impl LspClient {
     /// Legacy trace adapter. Input is zero-based UTF-8 byte offsets.
     /// Ambiguous definitions deliberately remain unresolved.
     pub fn definition(&mut self, file: &Path, line: usize, col: usize) -> Option<(PathBuf, usize)> {
-        let text = self.ensure_open(file).ok()?;
-        let character = byte_to_utf16(&text, line, col).ok()?;
-        let mut locations = self.locations(file, line, character, false).ok()?;
-        if locations.len() != 1 {
+        if self.stopped {
             return None;
         }
-        let location = locations.pop()?;
-        Some((location.file, location.line))
+        match self.trace_definition(file, line, col) {
+            Ok(location) => location,
+            Err(error) => {
+                crate::presentation::warn(format!(
+                    "LSP trace fallback at {}:{}:{}: {error}",
+                    file.display(),
+                    line + 1,
+                    col + 1
+                ));
+                // A broken transport must not cost another full timeout for every call in the trace.
+                self.stop();
+                None
+            }
+        }
+    }
+
+    fn trace_definition(
+        &mut self,
+        file: &Path,
+        line: usize,
+        col: usize,
+    ) -> Result<Option<(PathBuf, usize)>, XrayError> {
+        let text = self.ensure_open(file)?;
+        let character = byte_to_utf16(&text, line, col)?;
+        let mut locations = self.locations(file, line, character, false)?;
+        if locations.len() > 1 {
+            crate::presentation::warn(format!(
+                "ambiguous LSP trace definition at {}:{}:{} ({} candidates)",
+                file.display(),
+                line + 1,
+                col + 1,
+                locations.len()
+            ));
+            return Ok(None);
+        }
+        Ok(locations
+            .pop()
+            .map(|location| (location.file, location.line)))
     }
 
     pub(crate) fn locations(
@@ -191,11 +232,13 @@ impl LspClient {
         } else {
             "textDocument/definition"
         };
-        let params = json!({
+        let mut params = json!({
             "textDocument":{"uri":path_to_uri(file)?},
-            "position":{"line":line,"character":character},
-            "context":{"includeDeclaration":true}
+            "position":{"line":line,"character":character}
         });
+        if references {
+            params["context"] = json!({"includeDeclaration":false});
+        }
         let deadline = Instant::now() + TIMEOUT;
         let mut result = self.request_until(method, &params, deadline)?;
         // Wait only for actual server progress, never a guessed sleep. Requery after indexing.
@@ -210,9 +253,12 @@ impl LspClient {
 
     /// Open imports before definition requests, without guessed indexing sleeps.
     pub fn warm_up(&mut self, file: &Path, imports: &[PathBuf]) {
-        let _ = self.ensure_open(file);
-        for path in imports {
-            let _ = self.ensure_open(path);
+        for path in std::iter::once(file).chain(imports.iter().map(PathBuf::as_path)) {
+            if let Err(error) = self.ensure_open(path) {
+                crate::presentation::warn(format!("LSP trace warm-up failed: {error}"));
+                self.stop();
+                break;
+            }
         }
     }
 
@@ -346,8 +392,17 @@ impl LspClient {
                     let items = message["params"]["items"]
                         .as_array()
                         .ok_or_else(|| failure("invalid configuration request"))?;
-                    // Null per section explicitly means use the server's own defaults.
-                    Value::Array(items.iter().map(|_| Value::Null).collect())
+                    Value::Array(
+                        items
+                            .iter()
+                            .map(|item| {
+                                configuration_section(
+                                    &self.configuration,
+                                    item.get("section").and_then(Value::as_str),
+                                )
+                            })
+                            .collect(),
+                    )
                 }
                 "client/registerCapability"
                 | "client/unregisterCapability"
@@ -533,6 +588,29 @@ pub(crate) fn write_until(
     Ok(())
 }
 
+/// Retain documented server defaults, but exclude hidden caches like the freshness scanner.
+/// Vendor remains indexed: Laravel navigation needs dependency declarations and `PHPDoc` types.
+fn php_configuration() -> Value {
+    json!({"intelephense":{"files":{"exclude":[
+        "**/.*/**", "**/.git/**", "**/.svn/**", "**/.hg/**", "**/CVS/**",
+        "**/.DS_Store/**", "**/node_modules/**", "**/bower_components/**",
+        "**/vendor/**/{Tests,tests}/**", "**/.history/**", "**/vendor/**/vendor/**"
+    ]}}})
+}
+
+fn configuration_section(configuration: &Value, section: Option<&str>) -> Value {
+    section.map_or_else(
+        || configuration.clone(),
+        |section| {
+            section
+                .split('.')
+                .try_fold(configuration, |value, key| value.get(key))
+                .cloned()
+                .unwrap_or(Value::Null)
+        },
+    )
+}
+
 pub(crate) fn php_executable() -> Result<PathBuf, XrayError> {
     use std::os::unix::fs::PermissionsExt;
     let program = std::env::var_os("XRAY_INTELEPHENSE").unwrap_or_else(|| "intelephense".into());
@@ -601,7 +679,7 @@ pub(crate) fn parse_locations(value: &Value) -> Result<Vec<Location>, XrayError>
     let values = value
         .as_array()
         .map_or_else(|| std::slice::from_ref(value), Vec::as_slice);
-    values
+    let mut locations = values
         .iter()
         .map(|location| {
             let linked = location.get("targetUri").is_some();
@@ -635,7 +713,10 @@ pub(crate) fn parse_locations(value: &Value) -> Result<Vec<Location>, XrayError>
             }
             Ok(location)
         })
-        .collect()
+        .collect::<Result<Vec<_>, XrayError>>()?;
+    locations.sort_unstable();
+    locations.dedup();
+    Ok(locations)
 }
 
 pub(crate) fn read_source(path: &Path) -> Result<String, XrayError> {
@@ -808,6 +889,25 @@ read()
     }
 
     #[test]
+    fn php_configuration_excludes_hidden_caches_but_keeps_vendor_types() {
+        let settings = php_configuration();
+        let excludes = configuration_section(&settings, Some("intelephense.files.exclude"));
+        let patterns = excludes.as_array().unwrap();
+        assert!(patterns.contains(&json!("**/.*/**")));
+        assert!(patterns.contains(&json!("**/node_modules/**")));
+        assert!(!patterns.contains(&json!("**/vendor/**")));
+        assert_eq!(
+            configuration_section(&settings, Some("intelephense")),
+            settings["intelephense"]
+        );
+        assert_eq!(
+            configuration_section(&settings, Some("unknown")),
+            Value::Null
+        );
+        assert_eq!(configuration_section(&settings, None), settings);
+    }
+
+    #[test]
     fn configuration_response_has_one_value_per_requested_section() {
         let (_root,mut client) = mock("q=read(); send({'id':q['id'],'method':'workspace/configuration','params':{'items':[{'section':'intelephense'},{'section':'files'}]}}); answer=read(); send({'id':q['id'],'result':answer['result']})");
         assert_eq!(
@@ -834,6 +934,42 @@ read()
         let started = Instant::now();
         client.shutdown();
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn legacy_trace_exposes_server_failure_and_stops_retrying_broken_transport() {
+        let (root, mut client) = mock("read(); q=read(); send({'id':q['id'],'error':{'code':-32603,'message':'index failed'}})");
+        let file = root.path().join("file.php");
+        std::fs::write(&file, "<?php target();").unwrap();
+        assert!(client.definition(&file, 0, 6).is_none());
+        assert!(client.stopped);
+        assert!(client.definition(&file, 0, 6).is_none());
+        let mut report = crate::presentation::Report {
+            text: String::new(),
+            json: json!({"status":"complete"}),
+        };
+        crate::presentation::attach_warnings(&mut report);
+        assert_eq!(report.json["status"], "partial");
+        assert!(report.text.contains("index failed"));
+    }
+
+    #[test]
+    fn references_exclude_declarations_and_keep_empty_results_explicit() {
+        let (root, mut client) = mock("q=read(); assert q['method']=='textDocument/references'; assert q['params']['context']['includeDeclaration'] is False; send({'id':q['id'],'result':[]})");
+        assert!(client
+            .locations(&root.path().join("file.php"), 0, 0, true)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn duplicate_server_locations_are_deduplicated_without_collapsing_distinct_ranges() {
+        let first = json!({"uri":"file:///tmp/a.php","range":{"start":{"line":1,"character":2},"end":{"line":1,"character":3}}});
+        let second = json!({"uri":"file:///tmp/a.php","range":{"start":{"line":1,"character":5},"end":{"line":1,"character":6}}});
+        let locations = parse_locations(&json!([second, first, first])).unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].character, 2);
+        assert_eq!(locations[1].character, 5);
     }
 
     #[test]

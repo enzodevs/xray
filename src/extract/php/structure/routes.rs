@@ -1,6 +1,7 @@
+use std::fmt::Write as _;
 use tree_sitter::Node;
 
-use super::{Context, arguments, is_callable, is_closure, literal, txt};
+use super::{arguments, is_callable, is_closure, literal, txt, Context};
 use crate::model::TypeDef;
 
 const DYNAMIC: &str = "<dynamic>";
@@ -10,6 +11,7 @@ struct Group {
     prefix: String,
     name: String,
     middleware: Vec<String>,
+    excluded_middleware: Vec<String>,
     controller: Option<String>,
     has_namespace: bool,
 }
@@ -156,10 +158,7 @@ fn extract(
             1,
         );
     }
-    let summary = format!(
-        "{action} name={name} middleware=[{}]",
-        group.middleware.join(", ")
-    );
+    let summary = route_summary(&action, &name, &group);
     routes.push(TypeDef {
         name: format!("{verbs} {path}"),
         kind: "route".to_string(),
@@ -169,6 +168,21 @@ fn extract(
         line_end: expr.end_position().row + 1,
         exported: false,
     });
+}
+
+fn route_summary(action: &str, name: &str, group: &Group) -> String {
+    let mut summary = format!(
+        "{action} name={name} middleware=[{}]",
+        group.middleware.join(", ")
+    );
+    if !group.excluded_middleware.is_empty() {
+        let _ = write!(
+            summary,
+            " excluded_middleware=[{}]",
+            group.excluded_middleware.join(", ")
+        );
+    }
+    summary
 }
 
 fn is_registration(name: &str) -> bool {
@@ -237,6 +251,12 @@ fn apply_option(key: &str, value: Option<Node>, src: &[u8], context: &Context, g
             || vec![DYNAMIC.to_string()],
             |value| literal_list(value, src),
         )),
+        "withoutMiddleware" | "excluded_middleware" => {
+            group.excluded_middleware.extend(value.map_or_else(
+                || vec![DYNAMIC.to_string()],
+                |value| literal_list(value, src),
+            ));
+        }
         "controller" => {
             group.controller = Some(
                 value

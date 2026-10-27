@@ -6,21 +6,22 @@ use crate::model::FileSummary;
 use crate::output::FileDigest;
 use crate::resolve::PathConfig;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolutionStatus {
     Resolved,
     External,
     Unresolved,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ResolutionDiagnostic {
     pub from: PathBuf,
     pub specifier: String,
     pub status: ResolutionStatus,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct ResolutionStats {
     pub resolved: usize,
     pub external: usize,
@@ -122,6 +123,17 @@ impl ProjectGraph {
             });
         }
         Ok(resolved)
+    }
+
+    pub fn syntax_recovery_files(&self) -> Vec<&Path> {
+        let mut files: Vec<_> = self
+            .files
+            .iter()
+            .filter(|(_, digest)| digest.syntax_recovered)
+            .map(|(path, _)| path.as_path())
+            .collect();
+        files.sort();
+        files
     }
 
     pub fn diagnostics(&self) -> &[ResolutionDiagnostic] {

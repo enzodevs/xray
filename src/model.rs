@@ -627,6 +627,7 @@ pub struct MarkdownDocument {
 }
 
 /// Compact representation of a file for follow-mode child nodes.
+#[derive(Serialize)]
 pub struct FileSummary {
     pub display_path: String,
     pub total_lines: usize,
@@ -634,6 +635,8 @@ pub struct FileSummary {
 }
 
 /// Compact summary content varies by file kind.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FileSummaryKind {
     Code {
         export_names: Vec<String>,

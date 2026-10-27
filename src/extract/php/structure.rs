@@ -48,7 +48,13 @@ fn test_block(expr: Node, src: &[u8]) -> Option<TestBlock> {
     let name = args
         .first()
         .and_then(|&arg| literal(arg, src))
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            if matches!(kind, "it" | "test" | "describe") {
+                "<dynamic>".into()
+            } else {
+                String::new()
+            }
+        });
     let mut children = Vec::new();
     if kind == "describe" {
         for arg in args {

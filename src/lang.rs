@@ -222,6 +222,11 @@ impl LanguageKind {
         }
     }
 
+    /// Only JS-family resolution consumes tsconfig paths; other languages must not load it.
+    pub fn uses_ts_path_config(self) -> bool {
+        matches!(self, Self::Ts | Self::Svelte | Self::Vue)
+    }
+
     /// Whether this ecosystem currently supports trace mode.
     pub fn supports_trace(self) -> bool {
         matches!(self, Self::Ts | Self::Go | Self::Svelte | Self::Vue)

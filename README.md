@@ -8,24 +8,25 @@
 
 <p align="center">
   <a href="https://github.com/enzodevs/xray/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-5c6ac4.svg">
+  <img alt="Version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-5c6ac4.svg">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-b7410e.svg">
 </p>
 
 ---
 
-Reading a large file just to find its exports, hooks, or callers wastes context. xray keeps the useful structure and leaves function bodies behind. Its output is often around 10% of the original source, with line numbers so you can jump straight to the code that matters.
+Reading a large file just to find its structure wastes context. xray reports symbols, source ranges and static relationships so an agent can choose what to read next. Compression varies by language and source; a small digest is not proof of complete analysis.
 
-It is built for coding agents, but the output is plain text and works just as well in a terminal.
+Output is designed for agents: compact text or JSON, explicit scope/status, and a 16 KiB default byte budget with exact private overflow artifacts. See the [agent navigation and AXI contract](docs/agent-navigation.md) and [verified results and limits](docs/agent-navigation-verification.md).
 
 ## What xray gives you
 
 - **A file map:** imports, exports, internal symbols, types, hooks, calls, tests, and line ranges.
 - **Local dependency trees:** follow imports without opening every file.
 - **Cross-file call traces:** start from one handler or method and follow the path through the project.
-- **Reverse dependencies:** find files that import the target before changing it.
+- **Reverse dependencies:** find static file dependents (including same-namespace PHP class references), not runtime callers.
+- **Exact PHP navigation:** query Intelephense definitions and references at a source position.
 - **Frontend structure:** React hooks and JSX trees, plus Vue and Svelte component structure.
-- **Machine-readable output:** emit a single-file digest as JSON for scripts and agent tooling.
+- **Machine-readable output:** compact JSON for digests, dependency trees, reverse lookup, definitions and references; oversized results remain valid JSON with recoverable evidence.
 
 xray parses syntax rather than matching text. It understands TypeScript/JavaScript, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown.
 
@@ -54,7 +55,7 @@ trace: getProfessorRecommendations  [L17-24]
         ←  apps/api/src/uniai/uniai-prompts.ts  [L302-328]
 ```
 
-The trace is static and bounded. Local calls resolve directly; `--lsp` adds language-server definitions for member calls such as `this.service.run()`.
+Legacy trace is a heuristic static navigation aid, not an authoritative call graph. Prefer exact `--definition` / `--references` queries when symbol identity matters; unsupported or dynamic relationships are not proof of absence.
 
 ## Install
 
@@ -105,8 +106,17 @@ xray --who src/lib/auth.ts
 # Show resolution counts and unresolved imports
 xray --explain src/app.ts
 
-# Produce a JSON digest for another tool
+# Produce a bounded JSON digest for another tool
 xray --no-follow --format json src/app.ts
+
+# Resolve the identifier at a 1-based line / UTF-8 byte column
+xray --definition --at 42:19 app/Jobs/SomeJob.php
+
+# Find static symbol references, not just importing files
+xray --references --at 16:7 --format json app/Models/User.php
+
+# Structured dependency tree, with a smaller context budget
+xray --follow --format json --max-bytes 4096 app/Models/User.php
 ```
 
 Run xray from the project or workspace root when you want import resolution, reverse lookup, or LSP tracing. This gives it the right `tsconfig.json`, `go.mod`, and workspace context.
@@ -115,13 +125,15 @@ Run xray from the project or workspace root when you want import resolution, rev
 
 PHP classes, interfaces, traits, and enums retain their compact type summaries, and their methods also appear as individual symbols with owner-qualified names (`Class::method`), signatures, one-based line ranges, and extracted calls. Public methods appear under exports; protected/private methods appear under internal. JSON uses the same method names and normalized `method` kind. These are syntax-level visibility groups, not a guarantee that a method is a public package API.
 
-Local namespace resolution reads the nearest `composer.json` without executing PHP or Composer. It supports `autoload` and `autoload-dev` PSR-4 mappings, multiple directories, and longest-prefix precedence. Missing classes under a mapped namespace are unresolved rather than external. Composer classmaps, PSR-0, dependency autoloaders, inherited/dynamically dispatched methods, and PHP cross-file tracing are not implemented. Relative includes and the legacy namespace-path fallback remain available when no PSR-4 mapping matches.
+Local namespace resolution reads the nearest `composer.json` without executing PHP or Composer. It supports `autoload` and `autoload-dev` PSR-4 mappings, multiple directories, and longest-prefix precedence. Missing classes under a mapped namespace are unresolved rather than external. The structural resolver does not implement Composer classmaps, PSR-0 or dependency autoloaders. PHP recursive call tracing is not implemented; separate LSP definition/reference queries can resolve typed symbols and inherited methods when supported by the server. Relative includes and the legacy namespace-path fallback remain available when no PSR-4 mapping matches.
+
+PHP also extracts Pest test blocks and recognized Laravel route registrations. Routes are structural records (`kind=route`), not immediate calls. Static class references augment PHP dependencies even without explicit imports. Dynamic framework behavior remains outside completeness guarantees.
 
 ### Reverse lookup scope
 
 `--who` enumerates tracked and untracked non-ignored files with Git, respecting nested `.gitignore` rules. Tracked files remain eligible even if an ignore rule matches them. Dependencies/build directories such as `vendor`, `node_modules`, and `target`, hidden directories, and symlinked paths are excluded. The scan stays within the selected Git repository: run against a file inside a submodule to inspect that submodule, rather than assuming the parent scan includes it. Ignore-file scope is independent of follow-mode `--all`.
 
-TypeScript and Composer configurations are reused per source directory during reverse lookup. Failure to enumerate an established Git root is an error, not permission to perform an unfiltered scan. Reverse lookup remains static import/link discovery, not a complete runtime call graph; large first-party repositories can still take time to parse.
+TypeScript and Composer configurations are reused per source directory during reverse lookup. Failure to enumerate an established Git root is an error, not permission to perform an unfiltered scan. For PHP targets, reverse lookup scans PHP only and includes named class references. Results report scan/recovery counts without echoing the target digest. Reverse lookup remains static dependency discovery, not a complete runtime call graph; large first-party repositories can still take time to parse.
 
 ## Modes
 
@@ -136,7 +148,10 @@ TypeScript and Composer configurations are reused per source directory during re
 | Follow one entry point | `xray --trace -s NAME FILE` | Traces only the named symbol |
 | Resolve member calls | `xray --trace --lsp FILE` | Asks a supported language server for definitions |
 | Audit resolution | `xray --explain FILE` | Reports resolved, external, and unresolved dependencies |
-| Feed another tool | `xray --no-follow --format json FILE` | Emits a single-file JSON digest |
+| Resolve a symbol | `xray --definition --at LINE:COL FILE` | Returns exact LSP definition locations |
+| Find symbol uses | `xray --references --at LINE:COL FILE` | Returns server-reported static references |
+| Feed another tool | `xray --format json FILE` | Emits a bounded single-file JSON digest |
+| Bound context | `xray --max-bytes 4096 FILE` | Caps stdout; saves exact overflow privately |
 
 You can pass more than one file to the regular text modes:
 
@@ -209,9 +224,12 @@ SQL digests retain statement structure and relationships such as `target:`, `sou
 
 ## Optional language servers
 
-Basic extraction, dependency following, and ordinary traces do not require a language server. Install one only when you need `--trace --lsp`:
+Basic extraction, dependency following, and ordinary traces do not require a language server. Definition/reference queries and `--trace --lsp` need a supported server:
 
 ```sh
+# PHP definition/reference navigation (freemium; definitions/references are free)
+npm install -g intelephense
+
 # TypeScript and JavaScript
 npm install -g typescript typescript-language-server
 

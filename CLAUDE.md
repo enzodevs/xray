@@ -1,6 +1,6 @@
 # xray
 
-Structural code and docs digest for TS/JS, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown files. ~10x compression.
+Bounded structural navigation for TS/JS, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown. Compression varies; extraction is not runtime completeness. See `docs/agent-navigation.md` for the AXI/output contract.
 
 ## Build & Verify
 
@@ -20,7 +20,11 @@ xray --who <file>                # reverse: show who imports this file
 xray --trace <file>              # trace cross-file call chains (depth 3)
 xray --trace --lsp <file>        # trace with LSP-resolved member calls
 xray --trace <file> -s <name>    # trace a specific symbol
-xray --no-follow <file>          # plain: single file digest only
+xray --no-follow <file>          # single-file structural digest
+xray --definition --at L:C <file> # exact LSP definition; 1-based UTF-8 byte column
+xray --references --at L:C <file> # static symbol references (including PHP)
+xray --follow --format json <file> # structured dependency tree
+xray --max-bytes 4096 <file>      # bounded output + private exact overflow
 ```
 
 ## Architecture
@@ -31,7 +35,9 @@ xray --no-follow <file>          # plain: single file digest only
 | `lang.rs` | `LanguageKind` enum (Ts/Sql/Py/Go/Php/Rs/Svelte/Vue/Md): central dispatch for extraction, resolution, capabilities |
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
-| `lsp.rs` | `LspClient`: JSON-RPC 2.0 over stdio, `typescript-language-server`, `gopls`, and `svelte-language-server` integration |
+| `lsp.rs` | Deadline-bounded LSP transport, positions/URIs, server capabilities and definitions/references |
+| `navigation.rs` | Exact position queries and reusable workspace LSP sessions |
+| `presentation.rs` | AXI byte caps, valid compact JSON, private exact overflow artifacts |
 | `reverse.rs` | `--who`: Git-aware source enumeration, directory-scoped config reuse, find importers (TS + Go + Python + PHP + Rust + SQL + Markdown links) |
 | `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::go`, `resolve::py`, `resolve::php`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
 | `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
@@ -68,6 +74,7 @@ xray --no-follow <file>          # plain: single file digest only
 - **Rust practices**: See [docs/rust-practices.md](docs/rust-practices.md) — MANDATORY
 - **Lints**: `clippy::all = deny`, `clippy::pedantic = warn` (see Cargo.toml)
 - **Errors**: `thiserror` only. No `unwrap()`/`expect()` outside tests
+- **Agent output**: route results through `presentation`; never print unbounded per-file output. Preserve errors, declared coverage and exact overflow. New output shapes need context-cost and recovery tests.
 - **Tests**: Descriptive names, one behavior per test. Use `parse_ts()` / `parse_tsx()` / `parse_rs()` helpers
 - **tree-sitter-typescript v0.23 gotchas** (runtime: tree-sitter v0.27):
   - Enum members are `property_identifier`, not `enum_member`

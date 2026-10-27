@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::XrayError;
@@ -14,6 +15,7 @@ pub struct FollowConfig {
 }
 
 /// A node in the dependency tree.
+#[derive(serde::Serialize)]
 struct DepNode {
     summary: FileSummary,
     children: Vec<DepNode>,
@@ -32,16 +34,27 @@ const NOISE_SUFFIXES: &[&str] = &[
 ];
 
 /// Process a file in follow mode: full digest for entry, tree of summaries.
-pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
+pub fn run(
+    entry_path: &str,
+    config: &FollowConfig,
+) -> Result<crate::presentation::Report, XrayError> {
     let entry = std::fs::canonicalize(Path::new(entry_path)).map_err(|e| XrayError::Io {
         path: entry_path.to_string(),
         source: e,
     })?;
 
-    let path_config = entry.parent().and_then(resolve::load_path_config);
     let mut graph = ProjectGraph::new();
     let entry = graph.load(&entry)?;
-    print!("{}", graph.digest(&entry).expect("entry was just loaded"));
+    let digest = graph
+        .digest(&entry)
+        .ok_or_else(|| XrayError::ParseFailed("entry missing from graph".into()))?;
+    let path_config = if digest.language_kind.uses_ts_path_config() {
+        entry.parent().and_then(resolve::load_path_config)
+    } else {
+        None
+    };
+    let digest_text = digest.to_string();
+    let digest_json = digest.to_value();
 
     let mut visited = HashSet::new();
     visited.insert(entry.clone());
@@ -50,6 +63,9 @@ pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
     let mut omitted = Vec::new();
 
     for canonical in graph.dependencies(&entry, path_config.as_ref())? {
+        if config.max_depth == 0 {
+            break;
+        }
         if !visited.insert(canonical.clone()) {
             continue;
         }
@@ -59,28 +75,46 @@ pub fn run(entry_path: &str, config: &FollowConfig) -> Result<(), XrayError> {
             continue;
         }
 
-        match build_subtree(
+        children.push(build_subtree(
             &canonical,
             1,
             config,
             path_config.as_ref(),
             &mut visited,
             &mut graph,
-        ) {
-            Ok(node) => children.push(node),
-            Err(e) => eprintln!("xray: {e}"),
-        }
+        )?);
     }
 
+    let resolution = graph.stats();
+    let recovered = graph.syntax_recovery_files();
+    let status = if resolution.unresolved > 0 || !recovered.is_empty() {
+        "partial"
+    } else {
+        "complete"
+    };
+    let mut text = format!("follow status={status} depth={} resolved={} external={} unresolved={} parser_recovery_files={}\n", config.max_depth, resolution.resolved, resolution.external, resolution.unresolved, recovered.len());
+    text.push_str(&digest_text);
     if !children.is_empty() || !omitted.is_empty() {
-        println!("│");
-        render_tree(&children, &omitted, "");
+        text.push_str("│\n");
+        render_tree(&children, &omitted, "", &mut text);
     }
     if config.explain {
-        render_diagnostics(&graph);
+        render_diagnostics(&graph, &mut text);
     }
-
-    Ok(())
+    for file in &recovered {
+        let _ = writeln!(
+            text,
+            "parser-recovery: {}",
+            crate::util::relative_path(file)
+        );
+    }
+    Ok(crate::presentation::Report {
+        text,
+        json: serde_json::json!({"schema_version": 1, "mode": "follow", "status": status,
+            "coverage": "static dependencies within depth; not runtime calls", "depth": config.max_depth,
+            "file": digest_json["file"], "results": children, "noise_omitted": omitted,
+            "resolution": resolution, "diagnostics": graph.diagnostics(), "parser_recovery_files": recovered}),
+    })
 }
 
 /// Recursively build a dependency subtree.
@@ -108,10 +142,14 @@ fn build_subtree(
                 continue;
             }
 
-            match build_subtree(&canonical, depth + 1, config, path_config, visited, graph) {
-                Ok(node) => children.push(node),
-                Err(e) => eprintln!("xray: {e}"),
-            }
+            children.push(build_subtree(
+                &canonical,
+                depth + 1,
+                config,
+                path_config,
+                visited,
+                graph,
+            )?);
         }
     }
 
@@ -122,9 +160,10 @@ fn build_subtree(
     })
 }
 
-fn render_diagnostics(graph: &ProjectGraph) {
+fn render_diagnostics(graph: &ProjectGraph, text: &mut String) {
     let stats = graph.stats();
-    println!(
+    let _ = writeln!(
+        text,
         "\nresolution: {} resolved, {} external, {} unresolved",
         stats.resolved, stats.external, stats.unresolved
     );
@@ -133,7 +172,8 @@ fn render_diagnostics(graph: &ProjectGraph) {
         .iter()
         .filter(|diagnostic| diagnostic.status == ResolutionStatus::Unresolved)
     {
-        println!(
+        let _ = writeln!(
+            text,
             "  unresolved: {} from {}",
             diagnostic.specifier,
             crate::util::relative_path(&diagnostic.from)
@@ -142,7 +182,7 @@ fn render_diagnostics(graph: &ProjectGraph) {
 }
 
 /// Render the dependency tree with box-drawing characters.
-fn render_tree(children: &[DepNode], omitted: &[String], prefix: &str) {
+fn render_tree(children: &[DepNode], omitted: &[String], prefix: &str, text: &mut String) {
     let has_omitted = !omitted.is_empty();
 
     for (i, child) in children.iter().enumerate() {
@@ -153,16 +193,16 @@ fn render_tree(children: &[DepNode], omitted: &[String], prefix: &str) {
         let summary_str = child.summary.to_string();
         let mut lines = summary_str.lines();
         if let Some(first) = lines.next() {
-            println!("{prefix}{connector}{first}");
+            let _ = writeln!(text, "{prefix}{connector}{first}");
         }
         for line in lines {
-            println!("{prefix}{continuation}{line}");
+            let _ = writeln!(text, "{prefix}{continuation}{line}");
         }
 
         if !child.children.is_empty() || !child.omitted.is_empty() {
-            println!("{prefix}{continuation}│");
+            let _ = writeln!(text, "{prefix}{continuation}│");
             let sub_prefix = format!("{prefix}{continuation}");
-            render_tree(&child.children, &child.omitted, &sub_prefix);
+            render_tree(&child.children, &child.omitted, &sub_prefix, text);
         }
     }
 
@@ -176,7 +216,7 @@ fn render_tree(children: &[DepNode], omitted: &[String], prefix: &str) {
                 omitted.join(", ")
             )
         };
-        println!("{prefix}└── {label}");
+        let _ = writeln!(text, "{prefix}└── {label}");
     }
 }
 

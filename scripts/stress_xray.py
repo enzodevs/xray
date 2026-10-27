@@ -80,6 +80,29 @@ def validate_digest(data):
             assert 1 <= span['start_line'] <= span['end_line'] <= file['total_lines'], ('invalid span', span)
 
 
+def full_output(stdout, mode):
+    """Recover only xray's explicit overflow; validation must not examine a lossy preview."""
+    if mode == 'json':
+        metadata = json.loads(stdout).get('truncation')
+        if not metadata:
+            return stdout
+        artifact = metadata['artifact']
+        expected = metadata['original_bytes']
+    else:
+        last = stdout.decode().splitlines()[-1:]
+        if not last or not last[0].startswith('status=truncated original_bytes='):
+            return stdout
+        header, artifact = last[0].split(' artifact=', 1)
+        expected = int(header.split('original_bytes=', 1)[1].split()[0])
+    path = Path(artifact)
+    if not path.is_absolute() or not path.parent.name.startswith('xray-output-') or path.name not in {'full.json', 'full.txt'}:
+        raise ValueError('unexpected overflow artifact path')
+    data = path.read_bytes()
+    if len(data) != expected:
+        raise ValueError('overflow artifact length mismatch')
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -118,16 +141,26 @@ def main():
                     (args.output / f'{identifier}.stdout').write_bytes(stdout)
                     (args.output / f'{identifier}.stderr').write_bytes(stderr)
                     error = None
-                    if code == 0 and mode == 'json':
+                    full = stdout
+                    recovered = False
+                    if code == 0:
                         try:
-                            validate_digest(json.loads(stdout))
-                        except (ValueError, KeyError, TypeError, AssertionError) as exc:
+                            full = full_output(stdout, mode)
+                            if full != stdout:
+                                (args.output / f'{identifier}.full.stdout').write_bytes(full)
+                            if mode == 'json':
+                                data = json.loads(full)
+                                validate_digest(data)
+                                recovered = data.get('syntax_recovered', False)
+                        except (OSError, ValueError, KeyError, TypeError, AssertionError) as exc:
                             error = str(exc)
                     results.append({'id': identifier, 'root': str(root), 'file': str(relative),
                                     'extension': extension, 'mode': mode, 'command': command,
                                     'exit': code, 'timeout': expired, 'seconds': elapsed,
                                     'source_bytes': (root / relative).stat().st_size,
-                                    'output_bytes': len(stdout), 'validation_error': error})
+                                    'output_bytes': len(stdout), 'full_output_bytes': len(full),
+                                    'output_truncated': full != stdout, 'syntax_recovered': recovered,
+                                    'validation_error': error})
                     with (args.output / 'results.jsonl').open('a') as stream:
                         stream.write(json.dumps(results[-1]) + '\n')
             print(f'{root.name} {extension}: {len(selected)}/{len(files)} files', flush=True)
@@ -144,7 +177,9 @@ def main():
                                    'p95_seconds': times[math.ceil(len(times)*.95)-1],
                                    'max_seconds': max(times),
                                    'source_bytes': sum(r['source_bytes'] for r in rows),
-                                   'output_bytes': sum(r['output_bytes'] for r in rows)}
+                                   'output_bytes': sum(r['output_bytes'] for r in rows),
+                                   'full_output_bytes': sum(r['full_output_bytes'] for r in rows),
+                                   'truncated_outputs': sum(r['output_truncated'] for r in rows)}
     (args.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps(summary, indent=2))
     return bool(failures)

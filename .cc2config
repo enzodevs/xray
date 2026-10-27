@@ -1,10 +1,10 @@
 {
   "scopes": {
     "default": {
-      "directories": ["src", "docs"]
+      "directories": ["src", "tests", "docs"]
     },
     "source": {
-      "directories": ["src"]
+      "directories": ["src", "tests"]
     },
     "docs": {
       "directories": ["docs"]

@@ -86,10 +86,7 @@ pub(crate) fn load_path_config(start_dir: &Path) -> Option<PathConfig> {
     let val: serde_json::Value = match serde_json::from_str(&stripped) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!(
-                "xray: warning: failed to parse {}: {e}",
-                tsconfig_path.display()
-            );
+            crate::presentation::warn(format!("failed to parse {}: {e}", tsconfig_path.display()));
             return None;
         }
     };

@@ -17,6 +17,30 @@ fn symbols(src: &str) -> FileSymbols {
 }
 
 #[test]
+fn route_middleware_exclusions_are_visible_not_silently_ignored() {
+    let result = symbols(
+        r"<?php
+        use Illuminate\Support\Facades\Route;
+        Route::middleware('auth')->group(function () {
+            Route::get('/public', fn () => 'ok')->withoutMiddleware('auth');
+        });
+    ",
+    );
+    assert_eq!(result.types.len(), 1);
+    assert!(result.types[0].summary.contains("middleware=[auth]"));
+    assert!(result.types[0]
+        .summary
+        .contains("excluded_middleware=[auth]"));
+}
+
+#[test]
+fn dynamic_pest_descriptions_are_explicit() {
+    let result = symbols("<?php it($description, function () {}); beforeEach(function () {});");
+    assert_eq!(result.tests[0].name, "<dynamic>");
+    assert_eq!(result.tests[1].name, "");
+}
+
+#[test]
 fn dependencies_resolve_current_namespace_fully_qualified_and_relative_names() {
     let result = symbols(
         r"<?php namespace App\Models;
@@ -70,12 +94,10 @@ fn dependencies_keep_aliases_and_group_uses_namespace_scoped() {
             "GlobalClass"
         ]
     );
-    assert!(
-        !result
-            .imports
-            .iter()
-            .any(|name| name.contains("First\\Vendor"))
-    );
+    assert!(!result
+        .imports
+        .iter()
+        .any(|name| name.contains("First\\Vendor")));
 }
 
 #[test]
@@ -226,16 +248,12 @@ fn routes_distinguish_deferred_closures_redirects_and_inertia_without_fabricated
     assert_eq!(result.types.len(), 3);
     assert!(result.types[0].summary.starts_with("action=closure"));
     assert_eq!(result.types[1].name, "ANY /old");
-    assert!(
-        result.types[1]
-            .summary
-            .starts_with("action=redirect target=/new")
-    );
-    assert!(
-        result.types[2]
-            .summary
-            .starts_with("action=inertia target=settings/Appearance")
-    );
+    assert!(result.types[1]
+        .summary
+        .starts_with("action=redirect target=/new"));
+    assert!(result.types[2]
+        .summary
+        .starts_with("action=inertia target=settings/Appearance"));
     assert_eq!(result.exports.len(), 1);
 }
 

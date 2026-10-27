@@ -16,6 +16,7 @@ pub struct FileDigest {
     pub ext: String,
     pub total_lines: usize,
     pub content: FileContent,
+    pub syntax_recovered: bool,
     pub(crate) diagnostic_specifiers: Vec<String>,
 }
 
@@ -40,6 +41,7 @@ impl FileDigest {
             ext,
             total_lines,
             content,
+            syntax_recovered: parsed.has_syntax_errors(),
             diagnostic_specifiers,
         })
     }
@@ -78,11 +80,39 @@ impl FileDigest {
         self.content.as_code()
     }
 
-    /// Render the stable machine-readable schema.
-    pub fn to_json(&self) -> Result<String, XrayError> {
-        let value = serde_json::json!({
+    pub fn status(&self) -> &'static str {
+        if self.syntax_recovered {
+            "partial"
+        } else {
+            "complete"
+        }
+    }
+
+    pub fn counts(&self) -> serde_json::Value {
+        match &self.content {
+            FileContent::Code(symbols) => serde_json::json!({
+                "dependencies": symbols.imports.len(), "exports": symbols.exports.len(),
+                "internals": symbols.internals.len(),
+                "types": symbols.types.iter().filter(|item| item.kind != "route").count(),
+                "routes": symbols.types.iter().filter(|item| item.kind == "route").count(),
+                "test_blocks": test_count(&symbols.tests),
+            }),
+            FileContent::Markdown(document) => serde_json::json!({
+                "headings": heading_count(&document.headings), "links": document.links.len(),
+                "code_blocks": document.code_blocks.len(),
+            }),
+        }
+    }
+
+    /// Structured digest; completeness describes extraction, not runtime semantics.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
             "schema_version": 1,
             "mode": "digest",
+            "status": self.status(),
+            "coverage": "syntax; PHP imports include static class references; calls are lexical hints, not resolved edges",
+            "syntax_recovered": self.syntax_recovered,
+            "counts": self.counts(),
             "file": {
                 "path": self.display_path,
                 "language": self.language_kind,
@@ -90,9 +120,7 @@ impl FileDigest {
                 "total_lines": self.total_lines,
                 "content": self.content,
             }
-        });
-        serde_json::to_string_pretty(&value)
-            .map_err(|error| XrayError::ParseFailed(format!("serialize JSON: {error}")))
+        })
     }
 }
 
@@ -170,6 +198,30 @@ impl fmt::Display for FileDigest {
             "{}  ({}, {} lines)",
             self.display_path, self.ext, self.total_lines
         )?;
+        let references = match self.language_kind {
+            LanguageKind::Sql => "refs=structural",
+            LanguageKind::Md => "refs=links",
+            _ => "calls=lexical-hints",
+        };
+        writeln!(
+            f,
+            "status={} coverage=syntax {references}{}",
+            self.status(),
+            if self.syntax_recovered {
+                " warning=parser-recovery; inspect source"
+            } else {
+                ""
+            }
+        )?;
+        if let Some(counts) = self.counts().as_object() {
+            for (index, (name, count)) in counts.iter().enumerate() {
+                if index > 0 {
+                    write!(f, " ")?;
+                }
+                write!(f, "{name}={count}")?;
+            }
+            writeln!(f)?;
+        }
         writeln!(f)?;
 
         match &self.content {
@@ -179,6 +231,20 @@ impl fmt::Display for FileDigest {
 
         Ok(())
     }
+}
+
+fn test_count(tests: &[crate::model::TestBlock]) -> usize {
+    tests
+        .iter()
+        .map(|test| 1 + test_count(&test.children))
+        .sum()
+}
+
+fn heading_count(headings: &[crate::model::MarkdownHeading]) -> usize {
+    headings
+        .iter()
+        .map(|heading| 1 + heading_count(&heading.children))
+        .sum()
 }
 
 fn summary_heading_titles(document: &MarkdownDocument) -> Vec<String> {
@@ -211,7 +277,12 @@ fn write_code_digest(
     };
 
     if !symbols.imports.is_empty() {
-        writeln!(f, "imports: {}", symbols.imports.join(", "))?;
+        let label = if language_kind == LanguageKind::Php {
+            "dependencies"
+        } else {
+            "imports"
+        };
+        writeln!(f, "{label}: {}", symbols.imports.join(", "))?;
         writeln!(f)?;
     }
 
@@ -250,13 +321,23 @@ fn write_code_digest(
         }
     }
 
-    if !symbols.types.is_empty() {
-        writeln!(f, "types:")?;
-        for t in &symbols.types {
-            writeln!(f, "{}", Indented("  ", t))?;
-        }
-        if !symbols.tests.is_empty() {
-            writeln!(f)?;
+    for (heading, route) in [("types", false), ("routes", true)] {
+        if symbols
+            .types
+            .iter()
+            .any(|item| (item.kind == "route") == route)
+        {
+            writeln!(f, "{heading}:")?;
+            for item in symbols
+                .types
+                .iter()
+                .filter(|item| (item.kind == "route") == route)
+            {
+                writeln!(f, "{}", Indented("  ", item))?;
+            }
+            if !symbols.tests.is_empty() {
+                writeln!(f)?;
+            }
         }
     }
 
@@ -531,6 +612,7 @@ mod tests {
         ));
 
         let digest = FileDigest {
+            syntax_recovered: false,
             display_path: "src/weird.ts".to_string(),
             language_kind: LanguageKind::Ts,
             ext: "ts".to_string(),
@@ -552,6 +634,7 @@ mod tests {
             .push(make_symbol("SELECT 1", vec!["count"]));
 
         let digest = FileDigest {
+            syntax_recovered: false,
             display_path: "queries/test.sql".to_string(),
             language_kind: LanguageKind::Sql,
             ext: "sql".to_string(),

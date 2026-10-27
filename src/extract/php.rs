@@ -300,7 +300,7 @@ fn extract_calls(body: Option<Node>, src: &[u8]) -> Vec<String> {
 }
 
 fn collect_calls_recursive(node: Node, src: &[u8], calls: &mut Vec<String>) {
-    // Deferred callback bodies are not calls made by the enclosing function.
+    // Nested callable bodies have their own lexical scope, even when invoked immediately.
     if structure::is_closure(node)
         || matches!(node.kind(), "function_definition" | "method_declaration")
     {
@@ -312,7 +312,7 @@ fn collect_calls_recursive(node: Node, src: &[u8], calls: &mut Vec<String>) {
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        // Anonymous-class constructor arguments execute now; its methods do not.
+        // Constructor arguments belong to this scope; anonymous-class methods have their own.
         if node.kind() == "anonymous_class" && node.child_by_field_name("body") == Some(child) {
             continue;
         }
@@ -599,11 +599,9 @@ mod tests {
         assert_eq!(symbols.exports[2].name(), "Shared::helper");
         assert_eq!(symbols.exports[3].name(), "State::label");
         assert_eq!(symbols.internals[0].calls, vec!["trim"]);
-        assert!(
-            symbols.internals[1]
-                .signature
-                .starts_with("private static method")
-        );
+        assert!(symbols.internals[1]
+            .signature
+            .starts_with("private static method"));
     }
 
     #[test]

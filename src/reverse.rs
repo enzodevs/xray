@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -9,36 +10,52 @@ use crate::output::FileDigest;
 use crate::{parser, resolve, util};
 
 /// Show who imports the target file by scanning the project.
-pub fn run(target_path: &str) -> Result<(), XrayError> {
+pub fn run(target_path: &str) -> Result<crate::presentation::Report, XrayError> {
     let target = std::fs::canonicalize(Path::new(target_path)).map_err(|e| XrayError::Io {
         path: target_path.to_string(),
         source: e,
     })?;
 
     let digest = FileDigest::from_path(&target)?;
-    print!("{digest}");
 
     let git_root = target
         .parent()
         .and_then(util::git_root)
         .ok_or_else(|| XrayError::ParseFailed("not inside a git repository".to_string()))?;
 
-    let path_config = target.parent().and_then(resolve::load_path_config);
-    let target_fn_names = extract_target_function_names(&digest);
-    let importers = find_importers(&git_root, &target, path_config.as_ref(), &target_fn_names)?;
-
-    println!("── imported by ──");
-    println!();
-
-    if importers.is_empty() {
-        println!("  (no importers found)");
+    let path_config = if digest.language_kind.uses_ts_path_config() {
+        target.parent().and_then(resolve::load_path_config)
     } else {
-        for (path, lines) in &importers {
-            println!("  {path}  ({lines} lines)");
-        }
+        None
+    };
+    let target_fn_names = extract_target_function_names(&digest);
+    let scan = scan_importers(&git_root, &target, path_config.as_ref(), &target_fn_names)?;
+    let status = if scan.skipped.is_empty() && scan.recovered == 0 && !digest.syntax_recovered {
+        "complete"
+    } else {
+        "partial"
+    };
+    let coverage = if digest.language_kind == LanguageKind::Php {
+        "PHP static class/import dependencies; Git-visible PHP files; not runtime callers"
+    } else {
+        "static imports; Git-visible supported files; not runtime callers"
+    };
+    let mut text = format!("{} static dependents status={status} scanned={} skipped={} parser_recovery_files={}\ncoverage: {coverage}\ntarget: {}\n", scan.importers.len(), scan.scanned, scan.skipped.len(), scan.recovered + usize::from(digest.syntax_recovered), digest.display_path);
+    for (path, lines) in &scan.importers {
+        let _ = writeln!(text, "{path} ({lines} lines)");
     }
-
-    Ok(())
+    for error in &scan.skipped {
+        let _ = writeln!(text, "skipped: {error}");
+    }
+    Ok(crate::presentation::Report {
+        text,
+        json: serde_json::json!({
+            "schema_version":1,"mode":"who","status":status,"coverage":coverage,
+            "target":digest.display_path,"count":scan.importers.len(),"scanned":scan.scanned,
+            "parser_recovery_files":scan.recovered,"target_syntax_recovered":digest.syntax_recovered,"skipped":scan.skipped,
+            "results":scan.importers.iter().map(|(path,lines)| serde_json::json!({"path":path,"lines":lines})).collect::<Vec<_>>()
+        }),
+    })
 }
 
 /// Extract function names defined in a SQL target file.
@@ -88,27 +105,62 @@ fn symbols_reference_functions(symbols: &FileSymbols, target_fn_names: &[String]
     })
 }
 
+#[derive(Default)]
+struct ReverseScan {
+    importers: Vec<(String, usize)>,
+    scanned: usize,
+    recovered: usize,
+    skipped: Vec<String>,
+}
+
+#[cfg(test)]
 fn find_importers(
     project_root: &Path,
     target: &Path,
     path_config: Option<&resolve::PathConfig>,
     target_fn_names: &[String],
 ) -> Result<Vec<(String, usize)>, XrayError> {
-    let mut importers: Vec<(String, usize)> = Vec::new();
+    Ok(scan_importers(project_root, target, path_config, target_fn_names)?.importers)
+}
+
+fn scan_importers(
+    project_root: &Path,
+    target: &Path,
+    path_config: Option<&resolve::PathConfig>,
+    target_fn_names: &[String],
+) -> Result<ReverseScan, XrayError> {
+    let mut scan = ReverseScan::default();
+    let php_only = is_php_file(target);
     let mut configs = HashMap::new();
     let mut php_configs = HashMap::new();
 
     walk_project_files(project_root, &mut |file_path| {
-        let Ok(canonical) = file_path.canonicalize() else {
+        if php_only && !is_php_file(file_path) {
             return;
+        }
+        let canonical = match file_path.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                scan.skipped
+                    .push(format!("{}: {error}", file_path.display()));
+                return;
+            }
         };
         if canonical == target {
             return;
         }
 
-        let Ok(parsed) = parser::parse_file(file_path) else {
-            return;
+        scan.scanned += 1;
+        let parsed = match parser::parse_file(file_path) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                scan.skipped.push(error.to_string());
+                return;
+            }
         };
+        if parsed.has_syntax_errors() {
+            scan.recovered += 1;
+        }
 
         // Strategy 1: file-level include directives (\i, SOURCE, @@)
         // Include bare TS imports because a workspace path alias can look
@@ -117,10 +169,15 @@ fn find_importers(
         // Resolve each importer with its own nearest config. Reusing the
         // target package's config breaks aliases across monorepo workspaces.
         let directory = file_path.parent().unwrap_or(project_root);
-        let local_path_config = configs
-            .entry(directory.to_path_buf())
-            .or_insert_with(|| resolve::load_path_config(directory));
-        let effective_path_config = local_path_config.as_ref().or(path_config);
+        let effective_path_config = if parsed.language_kind.uses_ts_path_config() {
+            configs
+                .entry(directory.to_path_buf())
+                .or_insert_with(|| resolve::load_path_config(directory))
+                .as_ref()
+                .or(path_config)
+        } else {
+            None
+        };
         let php_paths = (parsed.language_kind == LanguageKind::Php).then(|| {
             php_configs
                 .entry(directory.to_path_buf())
@@ -147,9 +204,13 @@ fn find_importers(
                 continue;
             };
             if dependency_matches_target(parsed.language_kind, &resolved_canonical, target) {
-                let rel = util::relative_path(file_path);
+                let rel = file_path
+                    .strip_prefix(project_root)
+                    .unwrap_or(file_path)
+                    .to_string_lossy()
+                    .into_owned();
                 let lines = parsed.source.lines().count();
-                importers.push((rel, lines));
+                scan.importers.push((rel, lines));
                 return; // already matched, skip strategy 2
             }
         }
@@ -159,16 +220,20 @@ fn find_importers(
         if !target_fn_names.is_empty() && parsed.language_kind == LanguageKind::Sql {
             if let crate::model::FileContent::Code(file_symbols) = parsed.extract_content() {
                 if symbols_reference_functions(&file_symbols, target_fn_names) {
-                    let rel = util::relative_path(file_path);
+                    let rel = file_path
+                        .strip_prefix(project_root)
+                        .unwrap_or(file_path)
+                        .to_string_lossy()
+                        .into_owned();
                     let lines = parsed.source.lines().count();
-                    importers.push((rel, lines));
+                    scan.importers.push((rel, lines));
                 }
             }
         }
     })?;
 
-    importers.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(importers)
+    scan.importers.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(scan)
 }
 
 fn dependency_matches_target(language_kind: LanguageKind, resolved: &Path, target: &Path) -> bool {
@@ -314,6 +379,13 @@ fn resolve_source_specifier(
     path_config: Option<&resolve::PathConfig>,
 ) -> Option<PathBuf> {
     language_kind.resolve_source_specifier(specifier, from_file, path_config)
+}
+
+fn is_php_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(LanguageKind::for_extension)
+        == Some(LanguageKind::Php)
 }
 
 fn is_go_file(path: &Path) -> bool {
@@ -636,6 +708,7 @@ mod tests {
     #[test]
     fn extract_target_function_names_returns_empty_for_ts() {
         let digest = FileDigest {
+            syntax_recovered: false,
             display_path: "src/main.ts".to_string(),
             language_kind: LanguageKind::Ts,
             ext: "ts".to_string(),
@@ -658,6 +731,7 @@ mod tests {
     #[test]
     fn extract_target_function_names_extracts_from_internals() {
         let digest = FileDigest {
+            syntax_recovered: false,
             display_path: "ddl.sql".to_string(),
             language_kind: LanguageKind::Sql,
             ext: "sql".to_string(),
