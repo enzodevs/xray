@@ -53,6 +53,10 @@ enum CallLocation {
         display_path: String,
         lines: (usize, usize),
     },
+    DefinitionOnly {
+        display_path: String,
+        line: usize,
+    },
     Unresolved {
         reason: UnresolvedReason,
     },
@@ -81,7 +85,7 @@ enum CallTarget {
     },
 }
 
-/// Render trace mode: full digest + call tree for selected symbols.
+/// Render trace mode: file header + call tree for selected symbols.
 pub fn render(entry_path: &str, config: &TraceConfig) -> Result<String, XrayError> {
     let entry = std::fs::canonicalize(Path::new(entry_path)).map_err(|e| XrayError::Io {
         path: entry_path.to_string(),
@@ -126,7 +130,18 @@ pub fn render(entry_path: &str, config: &TraceConfig) -> Result<String, XrayErro
         None
     };
 
-    let mut rendered = digest.to_string();
+    // Only the file header: the outline belongs to --no-follow and would push the
+    // requested trace past the output budget on large files.
+    let mut rendered = format!(
+        "{}  ({}, {} lines)\n\n",
+        digest.display_path, digest.ext, digest.total_lines
+    );
+    if digest.syntax_recovered {
+        crate::presentation::warn(format!(
+            "trace entry has parser recovery: {}; inspect source",
+            digest.display_path
+        ));
+    }
 
     let symbols = select_symbols(entry_symbols, config.target_symbol.as_deref());
     if symbols.is_empty() {
@@ -136,6 +151,7 @@ pub fn render(entry_path: &str, config: &TraceConfig) -> Result<String, XrayErro
         if let Some(name) = &config.target_symbol {
             return Err(XrayError::Lsp(format!("trace symbol '{name}' not found")));
         }
+        rendered.push_str("(no exported symbols; select one with -s NAME)\n");
         return Ok(rendered);
     }
 
@@ -226,7 +242,11 @@ fn resolve_call(
 ) -> CallTarget {
     // Imported files in a monorepo can belong to a different package and
     // therefore a different nearest tsconfig than the entry file.
-    let local_path_config = file_path.parent().and_then(resolve::load_path_config);
+    let local_path_config = if language_kind.uses_ts_path_config() {
+        file_path.parent().and_then(resolve::load_path_config)
+    } else {
+        None
+    };
     let path_config = local_path_config.as_ref().or(path_config);
 
     // 1. Local symbol in the same file. Prefer the nearest lexical owner
@@ -585,38 +605,7 @@ fn try_lsp_resolve(
     let method = call_name.rsplit('.').next()?;
 
     let source = std::fs::read_to_string(file_path).ok()?;
-    let lines: Vec<&str> = source.lines().collect();
-
-    // Search within the caller's line range (1-based → 0-based index).
-    let start = caller_lines.0.saturating_sub(1);
-    let end = caller_lines.1.min(lines.len());
-
-    // Search for the full call pattern first (e.g. "emailProvider.send(")
-    // to avoid false-matching the function's own signature. Point the
-    // cursor at the method name portion for the LSP to resolve.
-    let full_needle = format!("{call_name}(");
-    let method_offset = call_name.len() - method.len();
-
-    let (line_0, col_0) = lines[start..end]
-        .iter()
-        .enumerate()
-        .find_map(|(offset, line_str)| {
-            line_str
-                .find(&full_needle)
-                .map(|col| (start + offset, col + method_offset))
-        })
-        .or_else(|| {
-            // Fallback: search for just "method(" (handles line-broken chains).
-            let short_needle = format!("{method}(");
-            lines[start..end]
-                .iter()
-                .enumerate()
-                .find_map(|(offset, line_str)| {
-                    line_str
-                        .find(&short_needle)
-                        .map(|col| (start + offset, col))
-                })
-        })?;
+    let (line_0, col_0) = find_call_position(&source, call_name, caller_lines)?;
 
     let (target_path, target_line_0) = lsp.definition(file_path, line_0, col_0)?;
 
@@ -630,7 +619,13 @@ fn try_lsp_resolve(
     if canonical_target == canonical_source {
         let digest = FileDigest::from_path(&canonical_source).ok()?;
         let symbols = digest.code_symbols()?;
-        let sym = find_definition_symbol(symbols, target_line_1, method)?;
+        let Some(sym) = find_definition_symbol(symbols, target_line_1, method) else {
+            return Some(definition_only_node(
+                call_name,
+                &canonical_target,
+                target_line_1,
+            ));
+        };
         let children = if depth < config.max_depth
             && !sym.calls.is_empty()
             && visited.insert((canonical_source.clone(), call_name.to_string()))
@@ -691,7 +686,11 @@ fn try_lsp_resolve(
         };
         ((s.line_start, s.line_end), sub)
     } else {
-        ((target_line_1, target_line_1), Vec::new())
+        return Some(definition_only_node(
+            call_name,
+            &canonical_target,
+            target_line_1,
+        ));
     };
 
     Some(CallNode {
@@ -702,6 +701,46 @@ fn try_lsp_resolve(
         },
         children,
     })
+}
+
+/// Find the lexical call position within the selected callable, in UTF-8 bytes.
+fn find_call_position(
+    source: &str,
+    call_name: &str,
+    caller_lines: (usize, usize),
+) -> Option<(usize, usize)> {
+    let method = call_name.rsplit('.').next()?;
+    let lines: Vec<_> = source.lines().collect();
+    let start = caller_lines.0.saturating_sub(1);
+    let end = caller_lines.1.min(lines.len());
+    let search = lines.get(start..end)?;
+    let full_needle = format!("{call_name}(");
+    let method_offset = call_name.len() - method.len();
+    search
+        .iter()
+        .enumerate()
+        .find_map(|(offset, line)| {
+            line.find(&full_needle)
+                .map(|col| (start + offset, col + method_offset))
+        })
+        .or_else(|| {
+            // Handles line-broken chains without matching an unrelated caller.
+            let short_needle = format!("{method}(");
+            search.iter().enumerate().find_map(|(offset, line)| {
+                line.find(&short_needle).map(|col| (start + offset, col))
+            })
+        })
+}
+
+fn definition_only_node(call_name: &str, path: &Path, line: usize) -> CallNode {
+    CallNode {
+        call_name: call_name.to_string(),
+        location: CallLocation::DefinitionOnly {
+            display_path: util::relative_path(path),
+            line,
+        },
+        children: Vec::new(),
+    }
 }
 
 /// Only traverse a declaration matching the called member, never an enclosing class.
@@ -760,6 +799,9 @@ fn render_call_tree(nodes: &[CallNode], prefix: &str, rendered: &mut String) {
                         node.call_name, display_path
                     );
                 }
+            }
+            CallLocation::DefinitionOnly { display_path, line } => {
+                let _ = writeln!(rendered, "{prefix}{connector}{}  (definition only; callable target unresolved)  {display_path}  [L{line}]", node.call_name);
             }
             CallLocation::Unresolved { reason } => {
                 let _ = writeln!(
@@ -820,6 +862,45 @@ mod tests {
     }
 
     #[test]
+    fn call_positions_are_scoped_and_preserve_utf8_byte_columns() {
+        let source = "other.save();\n  /* é */ service.save();\n  service\n    .save();\n";
+        assert_eq!(
+            find_call_position(source, "service.save", (2, 2)),
+            Some((1, 19))
+        );
+        assert_eq!(
+            find_call_position(source, "service.save", (3, 4)),
+            Some((3, 5))
+        );
+        assert_eq!(find_call_position(source, "service.save", (10, 12)), None);
+    }
+
+    #[test]
+    fn noncallable_definition_is_not_reported_as_external_or_traversed() {
+        let node = definition_only_node("setter", Path::new("Component.vue"), 12);
+        assert!(node.children.is_empty());
+        let mut text = String::new();
+        render_call_tree(&[node], "", &mut text);
+        assert!(text.contains("definition only; callable target unresolved"));
+        assert!(text.contains("Component.vue") && text.contains("[L12]"));
+        assert!(!text.contains("external") && !text.contains("(local)"));
+    }
+
+    #[test]
+    fn trace_starts_with_header_and_requested_tree_not_outline() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vue-lsp/Panel.vue");
+        let mut config = default_trace_config();
+        config.target_symbol = Some("submit".into());
+        let text = render(path.to_str().unwrap(), &config).unwrap();
+        assert!(text.lines().next().unwrap().contains("Panel.vue"));
+        assert!(text.contains("trace: submit"));
+        assert!(text.contains("service.save"));
+        assert!(
+            !text.contains("exports:") && !text.contains("imports:") && !text.contains("renders:")
+        );
+    }
+
+    #[test]
     fn validate_trace_capabilities_allows_ts() {
         let cfg = default_trace_config();
         let result = validate_trace_capabilities(LanguageKind::Ts, &cfg);
@@ -858,18 +939,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_trace_capabilities_rejects_vue_lsp() {
+    fn validate_trace_capabilities_allows_vue_lsp() {
         let mut cfg = default_trace_config();
         cfg.use_lsp = true;
-
-        let err = validate_trace_capabilities(LanguageKind::Vue, &cfg).unwrap_err();
-        match err {
-            XrayError::UnsupportedFeature { feature, language } => {
-                assert_eq!(feature, "--lsp");
-                assert_eq!(language, "Vue");
-            }
-            other => panic!("expected UnsupportedFeature, got {other:?}"),
-        }
+        assert!(validate_trace_capabilities(LanguageKind::Vue, &cfg).is_ok());
     }
 
     #[test]

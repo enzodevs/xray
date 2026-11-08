@@ -71,19 +71,44 @@ fn resolve_package_path(path: &Path) -> Option<PathBuf> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("go"))
+        .filter(|path| is_package_source(path))
         .collect::<Vec<_>>();
     files.sort();
 
-    files
-        .iter()
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| !name.ends_with("_test.go"))
-        })
-        .cloned()
-        .or_else(|| files.into_iter().next())
+    files.into_iter().next()
+}
+
+/// Enumerate an imported package, not one arbitrary representative file.
+/// This is structural: include platform/build-tag variants, but not tests or Go-ignored names.
+pub(crate) fn go_package_files(
+    representative: &Path,
+) -> Result<Vec<PathBuf>, crate::error::XrayError> {
+    let directory = representative.parent().unwrap_or(Path::new("."));
+    let io_error = |source| crate::error::XrayError::Io {
+        path: directory.display().to_string(),
+        source,
+    };
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).map_err(io_error)? {
+        let path = entry.map_err(io_error)?.path();
+        if is_package_source(&path) {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn is_package_source(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                path.extension().is_some_and(|ext| ext == "go")
+                    && !name.ends_with("_test.go")
+                    && !name.starts_with(['.', '_'])
+            })
 }
 
 #[cfg(test)]

@@ -81,6 +81,15 @@ impl ProjectGraph {
             ));
         };
         let language = digest.language_kind;
+        let local_config = language
+            .uses_ts_path_config()
+            .then(|| {
+                canonical
+                    .parent()
+                    .and_then(crate::resolve::load_path_config)
+            })
+            .flatten();
+        let path_config = local_config.as_ref().or(path_config);
         let mut specifiers = digest.dependency_specifiers();
         for specifier in digest.diagnostic_specifiers() {
             if !specifiers.contains(specifier) {
@@ -100,8 +109,20 @@ impl ProjectGraph {
             );
             let status = if let Some(candidate) = candidate {
                 if let Ok(candidate) = candidate.canonicalize() {
-                    if !resolved.contains(&candidate) {
-                        resolved.push(candidate);
+                    let candidates = if language == crate::lang::LanguageKind::Go {
+                        crate::resolve::go_package_files(&candidate)?
+                    } else {
+                        vec![candidate]
+                    };
+                    for candidate in candidates {
+                        let candidate =
+                            candidate.canonicalize().map_err(|source| XrayError::Io {
+                                path: candidate.display().to_string(),
+                                source,
+                            })?;
+                        if !resolved.contains(&candidate) {
+                            resolved.push(candidate);
+                        }
                     }
                     ResolutionStatus::Resolved
                 } else {
@@ -227,6 +248,37 @@ mod tests {
         assert_eq!(stats.external, 1);
         assert_eq!(stats.unresolved, 1);
         assert_eq!(stats.resolved, 0);
+    }
+
+    #[test]
+    fn followed_files_use_their_own_inherited_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        for package in ["a", "b"] {
+            fs::create_dir(dir.path().join(package)).unwrap();
+            fs::write(
+                dir.path().join(package).join("base.json"),
+                r#"{"compilerOptions":{"paths":{"local":["./value"]}}}"#,
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join(package).join("tsconfig.json"),
+                r#"{"extends":"./base.json"}"#,
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join(package).join("value.ts"),
+                "export const value = 1;",
+            )
+            .unwrap();
+        }
+        let entry = dir.path().join("b/main.ts");
+        fs::write(&entry, "import { value } from 'local';").unwrap();
+        let wrong_config = crate::resolve::load_path_config(&dir.path().join("a")).unwrap();
+        let mut graph = ProjectGraph::new();
+        assert_eq!(
+            graph.dependencies(&entry, Some(&wrong_config)).unwrap(),
+            vec![dir.path().join("b/value.ts").canonicalize().unwrap()]
+        );
     }
 
     #[test]

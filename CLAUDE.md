@@ -40,8 +40,8 @@ xray --max-bytes 4096 <file>      # bounded output + private exact overflow
 | `presentation.rs` | AXI byte caps, valid compact JSON, private exact overflow artifacts |
 | `reverse.rs` | `--who`: Git-aware source enumeration, directory-scoped config reuse, find importers (TS + Go + Python + PHP + Rust + SQL + Markdown links) |
 | `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::go`, `resolve::py`, `resolve::php`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
-| `resolve/ts.rs` | TS/JS import resolution: `PathConfig`, `resolve_import`, `load_path_config` |
-| `resolve/go.rs` | Go import resolution: `go.mod` module paths + relative package imports |
+| `resolve/ts.rs` | Local TS/JS import resolution; Oxc-backed inherited JSONC/tsconfig paths via `load_path_config` |
+| `resolve/go.rs` | Go import resolution: `go.mod` module paths + relative packages; enumerate all non-test package sources for follow |
 | `resolve/py.rs` | Python import resolution: relative (`.`/`..`) + local project modules/packages |
 | `resolve/php.rs` | PHP import resolution: nearest Composer PSR-4 mappings (including dev/array paths), relative includes, and legacy namespace fallback |
 | `resolve/rs.rs` | Rust module resolution: `mod`, `crate::`, `super::`, `self::` paths |
@@ -58,7 +58,8 @@ xray --max-bytes 4096 <file>      # bounded output + private exact overflow
 | `extract/rust.rs` | Rust extraction (use/mod, pub/private fns, structs/enums/traits/impls, derives, tests, calls) |
 | `extract/svelte.rs` | Svelte extraction (template components + `<script>` imports/exports/types/calls via TS backend) |
 | `extract/vue.rs` | Vue extraction (template components/directive calls + `<script>` imports/exports/types/calls via TS backend) |
-| `extract/sql.rs` | SQL statement extraction (SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE) + include directives |
+| `extract/sql.rs` | SQL statement extraction (SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE) |
+| `extract/sql_includes.rs` | SQL client includes at statement boundaries, excluding comments and quoted bodies |
 | `extract/jsx.rs` | JSX detection + hierarchy tree (`returns_jsx`, `extract_jsx_components`) |
 | `extract/hooks.rs` | React hooks extraction |
 | `extract/calls.rs` | Call extraction |

@@ -8,6 +8,7 @@ mod php;
 mod python;
 mod rust;
 mod sql;
+mod sql_includes;
 mod svelte;
 mod tests_block;
 mod types;

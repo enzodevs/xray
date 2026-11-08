@@ -48,7 +48,8 @@ impl LspClient {
     /// Spawn a supported language server and negotiate UTF-16 positions.
     pub fn start(root: &Path, language: LanguageKind) -> Result<Self, XrayError> {
         let (program, args) = server_command(language)?;
-        Self::start_command(root, &program, args, None)
+        let options = initialization_options(language)?;
+        Self::start_command(root, &program, args, &options, None)
     }
 
     pub(crate) fn start_php(root: &Path, storage: &Path) -> Result<Self, XrayError> {
@@ -56,13 +57,15 @@ impl LspClient {
         let program = program
             .to_str()
             .ok_or_else(|| failure("Intelephense executable path is not UTF-8"))?;
-        Self::start_command(root, program, &["--stdio"], Some(storage))
+        let options = json!({"storagePath":storage,"globalStoragePath":storage});
+        Self::start_command(root, program, &["--stdio"], &options, Some(storage))
     }
 
     fn start_command(
         root: &Path,
         program: &str,
         args: &[&str],
+        initialization_options: &Value,
         storage: Option<&Path>,
     ) -> Result<Self, XrayError> {
         let mut command = Command::new(program);
@@ -106,7 +109,7 @@ impl LspClient {
             "initialize",
             &json!({
                 "processId": std::process::id(), "rootUri": uri,
-            "initializationOptions":storage.map_or_else(|| json!({}), |path| json!({"storagePath":path,"globalStoragePath":path})),
+                "initializationOptions": initialization_options,
                 "workspaceFolders": [{"uri":uri,"name":"workspace"}],
                 "capabilities": {
                     "general":{"positionEncodings":["utf-16"]},
@@ -612,25 +615,100 @@ fn configuration_section(configuration: &Value, section: Option<&str>) -> Value 
 }
 
 pub(crate) fn php_executable() -> Result<PathBuf, XrayError> {
-    use std::os::unix::fs::PermissionsExt;
     let program = std::env::var_os("XRAY_INTELEPHENSE").unwrap_or_else(|| "intelephense".into());
     let path = Path::new(&program);
-    let resolved = if path.components().count() > 1 || path.is_absolute() {
-        path.canonicalize()
-            .map_err(|e| failure(format!("Intelephense executable: {e}")))?
-    } else {
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|directory| directory.join(path))
-            .find(|candidate| {
-                candidate
-                    .metadata()
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
-            .ok_or_else(|| failure("intelephense not found on PATH (or set XRAY_INTELEPHENSE)"))?
+    if path.components().count() > 1 || path.is_absolute() {
+        return path
             .canonicalize()
-            .map_err(|e| failure(e.to_string()))?
-    };
-    Ok(resolved)
+            .map_err(|e| failure(format!("Intelephense executable: {e}")));
+    }
+    find_executable(path)
+        .ok_or_else(|| failure("intelephense not found on PATH (or set XRAY_INTELEPHENSE)"))
+}
+
+/// Resolve an executable on PATH to its canonical (symlink-free) location.
+fn find_executable(name: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            candidate
+                .metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })?
+        .canonicalize()
+        .ok()
+}
+
+/// Vue support follows the official hybrid setup: tsserver loads `@vue/typescript-plugin`
+/// from the `@vue/language-server` package, so Vue SFC script positions resolve through TypeScript.
+fn initialization_options(language: LanguageKind) -> Result<Value, XrayError> {
+    match language {
+        LanguageKind::Vue => {
+            let location = vue_plugin_location()?.ok_or_else(|| {
+                failure(
+                    "@vue/language-server not found: install it so vue-language-server is on PATH \
+                     (or set XRAY_VUE_LANGUAGE_SERVER to the package directory)",
+                )
+            })?;
+            Ok(vue_initialization_options(&location))
+        }
+        LanguageKind::Ts => Ok(vue_plugin_location()?
+            .map_or_else(typescript_initialization_options, |location| {
+                vue_initialization_options(&location)
+            })),
+        _ => Ok(json!({})),
+    }
+}
+
+fn typescript_initialization_options() -> Value {
+    // The server's default "auto" routes early definitions to a syntax-only server
+    // while the project loads. Batch navigation needs semantic answers, not aliases
+    // pointing back to local imports/bindings. Requests remain deadline-bounded.
+    json!({"tsserver":{"useSyntaxServer":"never"}})
+}
+
+fn vue_initialization_options(location: &Path) -> Value {
+    let mut options = typescript_initialization_options();
+    options["plugins"] = json!([{
+        "name":"@vue/typescript-plugin",
+        "location":location,
+        "languages":["vue"],
+        "configNamespace":"typescript"
+    }]);
+    options
+}
+
+fn vue_plugin_location() -> Result<Option<PathBuf>, XrayError> {
+    if let Some(directory) = std::env::var_os("XRAY_VUE_LANGUAGE_SERVER") {
+        let directory = PathBuf::from(directory);
+        if !is_vue_language_server_package(&directory) {
+            return Err(failure(format!(
+                "XRAY_VUE_LANGUAGE_SERVER is not an @vue/language-server package: {}",
+                directory.display()
+            )));
+        }
+        return directory
+            .canonicalize()
+            .map(Some)
+            .map_err(|error| failure(error.to_string()));
+    }
+    // The binary lives at `<package>/bin/vue-language-server.js`; locate the owning package.
+    Ok(
+        find_executable(Path::new("vue-language-server")).and_then(|executable| {
+            executable
+                .ancestors()
+                .find(|directory| is_vue_language_server_package(directory))
+                .map(Path::to_path_buf)
+        }),
+    )
+}
+
+fn is_vue_language_server_package(directory: &Path) -> bool {
+    std::fs::read_to_string(directory.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|package| package["name"] == "@vue/language-server")
 }
 
 fn server_command(language: LanguageKind) -> Result<(String, &'static [&'static str]), XrayError> {
@@ -639,7 +717,9 @@ fn server_command(language: LanguageKind) -> Result<(String, &'static [&'static 
             std::env::var("XRAY_INTELEPHENSE").unwrap_or_else(|_| "intelephense".into()),
             &["--stdio"],
         )),
-        LanguageKind::Ts => Ok(("typescript-language-server".into(), &["--stdio"])),
+        LanguageKind::Ts | LanguageKind::Vue => {
+            Ok(("typescript-language-server".into(), &["--stdio"]))
+        }
         LanguageKind::Go => Ok(("gopls".into(), &["serve"])),
         LanguageKind::Svelte => Ok(("svelte-language-server".into(), &["--stdio"])),
         _ => Err(failure(format!(
@@ -662,6 +742,7 @@ fn language_id(path: &Path) -> &'static str {
         Some("php") => "php",
         Some("go") => "go",
         Some("svelte") => "svelte",
+        Some("vue") => "vue",
         _ => "javascript",
     }
 }
@@ -812,9 +893,14 @@ read()
 {script}
 "
         );
-        let client =
-            LspClient::start_command(root.path(), "python3", &["-I", "-u", "-c", &code], None)
-                .unwrap();
+        let client = LspClient::start_command(
+            root.path(),
+            "python3",
+            &["-I", "-u", "-c", &code],
+            &json!({}),
+            None,
+        )
+        .unwrap();
         (root, client)
     }
 
@@ -1013,12 +1099,89 @@ read()
             LanguageKind::Sql,
             LanguageKind::Py,
             LanguageKind::Rs,
-            LanguageKind::Vue,
             LanguageKind::Md,
         ] {
             assert!(server_command(language).is_err());
         }
         assert_eq!(server_command(LanguageKind::Php).unwrap().1, &["--stdio"]);
+    }
+
+    #[test]
+    fn vue_uses_typescript_server_with_official_vue_plugin() {
+        assert_eq!(
+            server_command(LanguageKind::Vue).unwrap().0,
+            "typescript-language-server"
+        );
+        assert_eq!(language_id(Path::new("Page.vue")), "vue");
+        let options = vue_initialization_options(Path::new("/opt/@vue/language-server"));
+        assert_eq!(
+            options["plugins"][0],
+            json!({"name":"@vue/typescript-plugin","location":"/opt/@vue/language-server",
+                   "languages":["vue"],"configNamespace":"typescript"})
+        );
+    }
+
+    #[test]
+    fn typescript_batch_queries_require_the_semantic_server() {
+        let options = typescript_initialization_options();
+        assert_eq!(options["tsserver"]["useSyntaxServer"], "never");
+        let vue = vue_initialization_options(Path::new("/opt/@vue/language-server"));
+        assert_eq!(vue["tsserver"], options["tsserver"]);
+    }
+
+    #[test]
+    #[ignore = "requires typescript-language-server and @vue/language-server on PATH"]
+    fn live_vue_lsp_resolves_both_directions_on_cold_start() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vue-lsp");
+        let vue = root.join("Panel.vue");
+        let service = root.join("service.ts");
+        let consumer = root.join("consumer.ts");
+        let mut client = LspClient::start(&root, LanguageKind::Vue).unwrap();
+        // Deliberately no sleeps or warm-up: the first query must be semantic.
+        assert_eq!(
+            client.definition(&vue, 3, 19),
+            Some((service.canonicalize().unwrap(), 1))
+        );
+        client.shutdown();
+        let mut client = LspClient::start(&root, LanguageKind::Ts).unwrap();
+        assert_eq!(
+            client.definition(&consumer, 2, 11),
+            Some((vue.canonicalize().unwrap(), 5))
+        );
+        client.shutdown();
+        let trace = crate::trace::render(
+            vue.to_str().unwrap(),
+            &crate::trace::TraceConfig {
+                max_depth: 2,
+                show_all: true,
+                target_symbol: Some("submit".into()),
+                use_lsp: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            trace.contains("service.save")
+                && trace.contains("service.ts")
+                && trace.contains("[L2-4]"),
+            "{trace}"
+        );
+        assert!(
+            !trace.contains("unresolved") && !trace.contains("external"),
+            "{trace}"
+        );
+    }
+
+    #[test]
+    fn vue_plugin_location_requires_the_owning_package() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("package.json"), r#"{"name":"other"}"#).unwrap();
+        assert!(!is_vue_language_server_package(root.path()));
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"@vue/language-server"}"#,
+        )
+        .unwrap();
+        assert!(is_vue_language_server_package(root.path()));
     }
 
     #[test]

@@ -233,12 +233,10 @@ fn attr_value(attr: Node, src: &[u8]) -> Option<String> {
 fn extract_component_symbol(root: Node, src: &[u8]) -> Option<Symbol> {
     let mut renders = collect_template_tree(root, src);
     dedup_template_nodes(&mut renders);
-    truncate_template_nodes(&mut renders, 8);
 
     let mut calls = collect_template_calls(root, src);
     calls.sort();
     calls.dedup();
-    calls.truncate(12);
 
     if renders.is_empty() && calls.is_empty() {
         return None;
@@ -278,8 +276,8 @@ fn collect_element(node: Node, src: &[u8]) -> Vec<JsxNode> {
         children.extend(collect_template_tree(child, src));
     }
 
+    // Keep the complete tree; presentation handles byte limits and recoverable overflow.
     dedup_template_nodes(&mut children);
-    truncate_template_nodes(&mut children, 8);
 
     if name.as_deref().is_some_and(is_component_tag) {
         vec![JsxNode {
@@ -362,15 +360,6 @@ fn dedup_template_nodes(nodes: &mut Vec<JsxNode>) {
     }
     for node in nodes.iter_mut() {
         dedup_template_nodes(&mut node.children);
-    }
-}
-
-fn truncate_template_nodes(nodes: &mut Vec<JsxNode>, max: usize) {
-    if nodes.len() > max {
-        nodes.truncate(max);
-    }
-    for node in nodes.iter_mut() {
-        truncate_template_nodes(&mut node.children, max);
     }
 }
 
@@ -635,6 +624,8 @@ fn is_local_module_specifier(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use tree_sitter::Parser;
 
     use super::*;
@@ -747,7 +738,9 @@ function submit() {
     #[test]
     fn empty_source_has_no_component() {
         let tree = parse_vue("");
-        assert!(extract_symbols_from_vue(tree.root_node(), b"").exports.is_empty());
+        assert!(extract_symbols_from_vue(tree.root_node(), b"")
+            .exports
+            .is_empty());
     }
 
     #[test]
@@ -795,5 +788,24 @@ import External from 'vue';
         assert_eq!(component.renders.len(), 2);
         assert!(has_render(&component.renders, "ModalPanel"));
         assert!(has_render(&component.renders, "user-card"));
+    }
+
+    #[test]
+    fn preserves_all_components_nested_in_plain_html() {
+        let tags = (1..=18).fold(String::new(), |mut tags, i| {
+            let _ = write!(tags, "<Comp{i:02} />");
+            tags
+        });
+        let src = format!("<template><div>{tags}</div></template>");
+        let tree = parse_vue(&src);
+        let symbols = extract_symbols_from_vue(tree.root_node(), src.as_bytes());
+        let component = symbols
+            .exports
+            .iter()
+            .find(|sym| sym.signature == "default component")
+            .expect("component symbol");
+
+        assert_eq!(component.renders.len(), 18);
+        assert!(has_render(&component.renders, "Comp18"));
     }
 }

@@ -80,7 +80,7 @@ cargo build --release
 ./target/release/xray --help
 ```
 
-A recent stable Rust toolchain is required.
+Rust 1.95 or newer is required (including the Oxc resolver dependency).
 
 ## Quick start
 
@@ -165,7 +165,7 @@ xray src/api.ts src/worker.ts
 |---|:---:|:---:|:---:|:---:|:---:|
 | TypeScript / JavaScript / JSX / TSX | ✓ | ✓ | ✓ | ✓ | `typescript-language-server` |
 | Go | ✓ | ✓ | ✓ | ✓ | `gopls` |
-| Vue | ✓ | ✓ | ✓ | ✓ | not required |
+| Vue | ✓ | ✓ | ✓ | ✓ | `typescript-language-server` + `@vue/language-server` |
 | Svelte | ✓ | ✓ | ✓ | ✓ | `svelte-language-server` |
 | Python | ✓ | ✓ | ✓ | — | — |
 | PHP | ✓ | ✓ | ✓ | — | — |
@@ -212,15 +212,15 @@ types:
   type SidebarMode "menu" | "chat"  [L143-143]
 ```
 
-Nested symbols keep their lexical scope during tracing, even when separate components reuse the same handler name.
+Nested symbols keep their lexical scope during tracing, even when separate components reuse the same handler name. Local aliases use Oxc's inherited `tsconfig` resolution, including JSONC, relative/package `extends`, arrays of base configurations, and origin-relative paths. Each followed file uses its own nearest configuration; this does not enable traversal of external npm packages.
 
 ### Go, Python, PHP, and Rust
 
-For backend files, xray reports imports, functions and methods, classes or structs, interfaces and aliases, significant calls, tests where applicable, and exact source ranges. Go module paths resolve through `go.mod`; Go LSP tracing uses `gopls`.
+For backend files, xray reports imports, functions and methods, classes or structs, interfaces and aliases, significant calls, tests where applicable, and exact source ranges. Go module paths resolve through `go.mod`; follow includes every non-test source file in an imported package instead of choosing one representative. This is structural enumeration, including platform/build-tag variants, not the active Go build graph. `--who` matches package imports for any source file in that package. Go LSP tracing uses `gopls`.
 
 ### SQL and Markdown
 
-SQL digests retain statement structure and relationships such as `target:`, `source:`, `join:`, `cte:`, and `fn:`. Markdown digests retain frontmatter, the heading tree, local and external links, and fenced-code languages. Follow mode traverses SQL includes and local Markdown links.
+SQL digests retain statement structure and relationships such as `target:`, `source:`, `join:`, `cte:`, and `fn:`. Markdown digests retain frontmatter, the heading tree, local and external links, and fenced-code languages. Follow mode traverses SQL includes and local Markdown links. SQL client includes are recognized at statement boundaries outside comments and quoted bodies, so a column such as `source VARCHAR NOT NULL` is not an include.
 
 ## Optional language servers
 
@@ -230,8 +230,11 @@ Basic extraction, dependency following, and ordinary traces do not require a lan
 # PHP definition/reference navigation (freemium; definitions/references are free)
 npm install -g intelephense
 
-# TypeScript and JavaScript
+# TypeScript and JavaScript (typescript-language-server 6 requires Node.js >= 22.22.2)
 npm install -g typescript typescript-language-server
+
+# Vue (also needs typescript-language-server)
+npm install -g @vue/language-server
 
 # Go
 go install golang.org/x/tools/gopls@latest
@@ -240,7 +243,17 @@ go install golang.org/x/tools/gopls@latest
 npm install -g svelte-language-server
 ```
 
-Vue traces use xray's own static resolution and do not require a Vue language server.
+Plain Vue traces use xray's own static resolution. `--trace --lsp` on Vue uses the TypeScript side of Vue's hybrid setup: `typescript-language-server` loads `@vue/typescript-plugin` from the `@vue/language-server` package found via `vue-language-server` on `PATH` (override with `XRAY_VUE_LANGUAGE_SERVER=/path/to/@vue/language-server`). TypeScript traces load the same plugin when it is available, so definitions crossing into `.vue` files resolve.
+
+TS/Vue batch queries use the semantic server from the first request, avoiding syntax-only answers while a project loads. If a definition identifies a binding or type rather than a callable body, trace labels it `definition only; callable target unresolved` and does not invent a call edge.
+
+Text traces print the entry file header before the requested tree; use `--no-follow` for the outline. Parser-recovery warnings remain visible. Vue/Svelte render trees and template calls are retained in full; the common byte-budget layer caps output and saves exact overflow artifacts instead of discarding components during extraction.
+
+The opt-in integration check exercises both Vue-to-TS and TS-to-Vue definitions on cold servers:
+
+```sh
+cargo test live_vue_lsp_resolves_both_directions_on_cold_start -- --ignored
+```
 
 ## How it works
 
@@ -264,14 +277,14 @@ Then open the exact ranges reported by xray.
 
 ## Stress testing and known limits
 
-The [real-project stress report](docs/stress-test-2026-09-08.md) covers 1,057 files across nine project collections, including large compiler fixtures. A repeatable runner is available:
+The [real-project stress report](docs/stress-test-2026-09-08.md) covers 1,057 files across nine project collections, including large compiler fixtures. The [navigation fidelity follow-up](docs/navigation-gap-verification.md) records the newer TS/Vue, Go, SQL, and overflow fixes with their verification and remaining limits. A repeatable runner is available:
 
 ```sh
 python3 scripts/stress_xray.py --binary target/release/xray \
   --output /tmp/xray-stress-new /path/to/project /path/to/oss-snapshot
 ```
 
-Compression depends on the input and output mode; JSON and followed dependencies can be much larger than a plain digest. Passing the stress runner checks execution and basic JSON invariants, not semantic completeness. TS-family digests filter many external imports, Rust public re-exports are not a complete API inventory, and returned anonymous handlers are not modeled as separate trace roots. LSP definition containment can also create false call edges (for example, a React setter mapped to its enclosing component); verify important edges in source. LSP requests currently have no internal deadline, so use an external timeout for unattended runs. `--who` requires Git metadata; downloaded snapshots without it are unsupported.
+Compression depends on the input and output mode; JSON and followed dependencies can be much larger than a plain digest. Passing the stress runner checks execution and basic JSON invariants, not semantic completeness. TS-family digests filter many external imports, Rust public re-exports are not a complete API inventory, and returned anonymous handlers are not modeled as separate trace roots. LSP trace only traverses a matching callable declaration, not an enclosing component or class; a binding/type definition alone does not establish the callable implementation. Verify important edges in source. LSP requests and shutdown are deadline-bounded; transport failures are reported rather than silently treated as empty results. `--who` requires Git metadata; downloaded snapshots without it are unsupported.
 
 ## License
 

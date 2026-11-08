@@ -234,7 +234,7 @@ impl LanguageKind {
 
     /// Whether this ecosystem currently supports LSP-assisted trace resolution.
     pub fn supports_lsp(self) -> bool {
-        matches!(self, Self::Ts | Self::Go | Self::Svelte)
+        matches!(self, Self::Ts | Self::Go | Self::Svelte | Self::Vue)
     }
 }
 
@@ -659,7 +659,7 @@ mod tests {
         assert!(LanguageKind::Svelte.supports_trace());
         assert!(LanguageKind::Svelte.supports_lsp());
         assert!(LanguageKind::Vue.supports_trace());
-        assert!(!LanguageKind::Vue.supports_lsp());
+        assert!(LanguageKind::Vue.supports_lsp());
         assert!(!LanguageKind::Md.supports_trace());
         assert!(!LanguageKind::Md.supports_lsp());
     }

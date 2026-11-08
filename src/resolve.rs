@@ -7,7 +7,7 @@ mod shared;
 mod sql;
 mod ts;
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Path alias configuration from tsconfig.json.
 ///
@@ -16,22 +16,30 @@ use std::path::PathBuf;
 /// in `resolve::ts` / `resolve::sql`.
 #[derive(Clone)]
 pub struct PathConfig {
-    base_url: PathBuf,
-    has_explicit_base_url: bool,
-    aliases: Vec<(String, Vec<String>)>,
+    config: Arc<oxc_resolver::TsConfig>,
 }
 
 impl PathConfig {
     pub(crate) fn matches_alias(&self, specifier: &str) -> bool {
-        self.aliases.iter().any(|(pattern, _)| {
-            pattern
-                .strip_suffix('*')
-                .map_or(specifier == pattern, |prefix| specifier.starts_with(prefix))
-        })
+        self.config
+            .compiler_options
+            .paths
+            .as_ref()
+            .is_some_and(|paths| {
+                paths.keys().any(|pattern| {
+                    pattern
+                        .split_once('*')
+                        .map_or(specifier == pattern, |(prefix, suffix)| {
+                            specifier.len() >= prefix.len() + suffix.len()
+                                && specifier.starts_with(prefix)
+                                && specifier.ends_with(suffix)
+                        })
+                })
+            })
     }
 }
 
-pub(crate) use go::resolve_go_import;
+pub(crate) use go::{go_package_files, resolve_go_import};
 pub(crate) use markdown::resolve_markdown_link;
 pub(crate) use php::{resolve_php_import, resolve_php_import_with_paths, PhpPaths};
 pub(crate) use py::resolve_py_import;

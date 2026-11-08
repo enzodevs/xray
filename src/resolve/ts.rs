@@ -43,20 +43,29 @@ pub(crate) fn resolve_import(
     }
 
     if let Some(cfg) = path_config {
-        for (pattern, replacements) in &cfg.aliases {
-            if let Some(resolved) = expand_alias(specifier, pattern, replacements, &cfg.base_url) {
+        for candidate in cfg.config.resolve_path_alias_or_base_url(specifier) {
+            if let Some(resolved) = try_extensions(&candidate) {
                 return Some(resolved);
             }
         }
-        if cfg.has_explicit_base_url {
-            if let Some(resolved) = try_extensions(&cfg.base_url.join(specifier)) {
+        if let Some(base_url) = &cfg.config.compiler_options.base_url {
+            if let Some(resolved) = try_extensions(&base_url.join(specifier)) {
                 return Some(resolved);
             }
         }
     }
 
-    // Fallback: @/ -> <git_root>/src/ when no path config.
-    if specifier.starts_with("@/") && path_config.is_none() {
+    // Preserve the conventional fallback when the config has no resolution settings.
+    let has_paths = path_config.is_some_and(|cfg| {
+        cfg.config.compiler_options.base_url.is_some()
+            || cfg
+                .config
+                .compiler_options
+                .paths
+                .as_ref()
+                .is_some_and(|paths| !paths.is_empty())
+    });
+    if specifier.starts_with("@/") && !has_paths {
         if let Some(root) = crate::util::git_root(parent) {
             let rest = &specifier[2..];
             let base = root.join("src").join(rest);
@@ -77,47 +86,20 @@ pub(crate) fn resolve_import(
     None
 }
 
-/// Search tsconfig.json walking up from `start_dir`, parse `paths` + `baseUrl`.
+/// Resolve inherited JSONC configuration through Oxc; local-file policy stays in xray.
 pub(crate) fn load_path_config(start_dir: &Path) -> Option<PathConfig> {
     let tsconfig_path = find_tsconfig(start_dir)?;
-    let content = std::fs::read_to_string(&tsconfig_path).ok()?;
-    let stripped = strip_jsonc_comments(&content);
-
-    let val: serde_json::Value = match serde_json::from_str(&stripped) {
-        Ok(v) => v,
-        Err(e) => {
-            crate::presentation::warn(format!("failed to parse {}: {e}", tsconfig_path.display()));
+    let config = match oxc_resolver::Resolver::default().resolve_tsconfig(&tsconfig_path) {
+        Ok(config) => config,
+        Err(error) => {
+            crate::presentation::warn(format!(
+                "failed to resolve {}: {error}",
+                tsconfig_path.display()
+            ));
             return None;
         }
     };
-
-    let compiler = val.get("compilerOptions")?;
-    let tsconfig_dir = tsconfig_path.parent()?;
-
-    let configured_base_url = compiler.get("baseUrl").and_then(serde_json::Value::as_str);
-    let base_url =
-        configured_base_url.map_or_else(|| tsconfig_dir.to_path_buf(), |b| tsconfig_dir.join(b));
-
-    let mut aliases = Vec::new();
-    if let Some(paths) = compiler.get("paths").and_then(serde_json::Value::as_object) {
-        for (pattern, targets) in paths {
-            let replacements: Vec<String> = targets
-                .as_array()?
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            aliases.push((pattern.clone(), replacements));
-        }
-    }
-    if configured_base_url.is_none() && aliases.is_empty() {
-        return None;
-    }
-
-    Some(PathConfig {
-        base_url,
-        has_explicit_base_url: configured_base_url.is_some(),
-        aliases,
-    })
+    Some(PathConfig { config })
 }
 
 /// Try a base path with various extensions: direct, .ts, .tsx, .js, .jsx,
@@ -143,95 +125,6 @@ fn is_local_module_specifier(source: &str) -> bool {
         || source.starts_with("$lib/")
 }
 
-/// Expand an alias pattern against a specifier.
-///
-/// E.g. pattern `@/*` with replacement `src/*` and specifier `@/hooks/use-chat`
-/// expands to `<base_url>/src/hooks/use-chat`, then resolves extensions.
-fn expand_alias(
-    specifier: &str,
-    pattern: &str,
-    replacements: &[String],
-    base_url: &Path,
-) -> Option<PathBuf> {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        if let Some(rest) = specifier.strip_prefix(prefix) {
-            for replacement in replacements {
-                if let Some(rep_prefix) = replacement.strip_suffix('*') {
-                    let base = base_url.join(format!("{rep_prefix}{rest}"));
-                    if let Some(resolved) = try_extensions(&base) {
-                        return Some(resolved);
-                    }
-                }
-            }
-        }
-    } else if specifier == pattern {
-        // Exact match (no wildcard)
-        for replacement in replacements {
-            let base = base_url.join(replacement);
-            if let Some(resolved) = try_extensions(&base) {
-                return Some(resolved);
-            }
-        }
-    }
-    None
-}
-
-/// Strip JSONC comments (`//` line and `/* */` block) while respecting strings.
-fn strip_jsonc_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        let ch = bytes[i];
-
-        // String literal — copy verbatim until closing quote
-        if ch == b'"' {
-            out.push('"');
-            i += 1;
-            while i < len {
-                let c = bytes[i];
-                out.push(c as char);
-                i += 1;
-                if c == b'\\' && i < len {
-                    out.push(bytes[i] as char);
-                    i += 1;
-                } else if c == b'"' {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        // Line comment
-        if ch == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            // Skip until end of line
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Block comment
-        if ch == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            if i + 1 < len {
-                i += 2; // skip */
-            }
-            continue;
-        }
-
-        out.push(ch as char);
-        i += 1;
-    }
-
-    out
-}
-
 /// Walk up directories from `start` looking for tsconfig.json.
 fn find_tsconfig(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_dir() {
@@ -255,37 +148,6 @@ fn find_tsconfig(start: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
-
-    // --- JSONC stripping ---
-
-    #[test]
-    fn strip_jsonc_removes_line_comments() {
-        let input = r#"{
-  // This is a comment
-  \"key\": \"value\"
-}"#;
-        let result = strip_jsonc_comments(input);
-        assert!(!result.contains("//"));
-        assert!(result.contains(r#"\"key\": \"value\""#));
-    }
-
-    #[test]
-    fn strip_jsonc_removes_block_comments() {
-        let input = r#"{
-  /* block comment */
-  \"key\": \"value\"
-}"#;
-        let result = strip_jsonc_comments(input);
-        assert!(!result.contains("/*"));
-        assert!(result.contains(r#"\"key\": \"value\""#));
-    }
-
-    #[test]
-    fn strip_jsonc_preserves_strings_with_slashes() {
-        let input = r#"{ \"url\": \"https://example.com/api\" }"#;
-        let result = strip_jsonc_comments(input);
-        assert_eq!(result, input);
-    }
 
     // --- try_extensions ---
 
@@ -427,30 +289,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // --- expand_alias ---
-
-    #[test]
-    fn expand_alias_replaces_wildcard() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
-        fs::create_dir(&src).unwrap();
-        let file = src.join("foo.ts");
-        fs::write(&file, "").unwrap();
-
-        let result = expand_alias("@/foo", "@/*", &["src/*".to_string()], dir.path());
-        assert_eq!(result, Some(file));
-    }
-
-    #[test]
-    fn expand_alias_exact_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("special.ts");
-        fs::write(&file, "").unwrap();
-
-        let result = expand_alias("@config", "@config", &["special".to_string()], dir.path());
-        assert_eq!(result, Some(file));
-    }
-
     // --- load_path_config ---
 
     #[test]
@@ -471,10 +309,15 @@ mod tests {
         .unwrap();
 
         let cfg = load_path_config(dir.path()).unwrap();
-        assert_eq!(cfg.base_url, dir.path().join("."));
-        assert_eq!(cfg.aliases.len(), 1);
-        assert_eq!(cfg.aliases[0].0, "@/*");
-        assert_eq!(cfg.aliases[0].1, vec!["src/*"]);
+        assert_eq!(
+            cfg.config.compiler_options.base_url.as_deref(),
+            Some(dir.path())
+        );
+        assert!(cfg.matches_alias("@/utils"));
+        assert_eq!(
+            cfg.config.resolve_path_alias_or_base_url("@/utils"),
+            vec![dir.path().join("src/utils")]
+        );
     }
 
     #[test]
@@ -503,7 +346,84 @@ mod tests {
         .unwrap();
 
         let cfg = load_path_config(dir.path()).unwrap();
-        assert_eq!(cfg.aliases.len(), 1);
+        assert!(cfg.matches_alias("@/utils"));
+    }
+
+    #[test]
+    fn inherited_paths_keep_their_origin_and_support_jsonc_and_unicode() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("config/código")).unwrap();
+        fs::create_dir_all(dir.path().join("app")).unwrap();
+        let target = dir.path().join("config/código/value.ts");
+        fs::write(&target, "").unwrap();
+        fs::write(dir.path().join("config/base.json"),
+            r#"{"compilerOptions": {/* unicode and trailing commas */ "paths":{"@/*":["código/*"],},},}"#).unwrap();
+        fs::write(
+            dir.path().join("app/tsconfig.json"),
+            r#"{"extends":"../config/base"}"#,
+        )
+        .unwrap();
+        let cfg = load_path_config(&dir.path().join("app")).unwrap();
+        assert_eq!(
+            resolve_import("@/value", &dir.path().join("app/main.ts"), Some(&cfg)),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn extends_array_and_package_config_obey_child_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("node_modules/@config/base")).unwrap();
+        fs::write(
+            dir.path().join("node_modules/@config/base/package.json"),
+            r#"{"exports":"./base.json"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("node_modules/@config/base/base.json"),
+            r#"{"compilerOptions":{"baseUrl":"../../../","paths":{"@/*":["old/*"]}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("second.json"),
+            r#"{"compilerOptions":{"paths":{"@/*":["second/*"]}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("tsconfig.json"),
+            r#"{"extends":["@config/base","./second.json"],"compilerOptions":{"paths":{"exact":["value"],"@/*/end":["*"]}}}"#).unwrap();
+        let target = dir.path().join("value.ts");
+        fs::write(&target, "").unwrap();
+        let cfg = load_path_config(dir.path()).unwrap();
+        assert_eq!(
+            resolve_import("exact", &dir.path().join("main.ts"), Some(&cfg)),
+            Some(target.clone())
+        );
+        assert_eq!(
+            resolve_import("@/value/end", &dir.path().join("main.ts"), Some(&cfg)),
+            Some(target)
+        );
+        assert!(!cfg.matches_alias("@/value"));
+        assert!(cfg.matches_alias("@/missing/end"));
+    }
+
+    #[test]
+    fn invalid_missing_and_cyclic_extends_emit_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        for source in [
+            "not json",
+            r#"{"extends":"./missing"}"#,
+            r#"{"extends":"./tsconfig.json"}"#,
+        ] {
+            fs::write(dir.path().join("tsconfig.json"), source).unwrap();
+            assert!(load_path_config(dir.path()).is_none());
+            let mut report = crate::presentation::Report {
+                text: String::new(),
+                json: serde_json::json!({"status":"complete"}),
+            };
+            crate::presentation::attach_warnings(&mut report);
+            assert_eq!(report.json["status"], "partial");
+            assert!(report.text.contains("failed to resolve"));
+        }
     }
 
     // --- resolve_import integration ---
@@ -533,14 +453,39 @@ mod tests {
         let entry = src.join("app.ts");
         fs::write(&entry, "").unwrap();
 
-        let cfg = PathConfig {
-            base_url: dir.path().to_path_buf(),
-            has_explicit_base_url: true,
-            aliases: vec![("@/*".to_string(), vec!["src/*".to_string()])],
-        };
+        fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        let cfg = load_path_config(dir.path()).unwrap();
 
         let result = resolve_import("@/utils", &entry, Some(&cfg));
         assert_eq!(result, Some(target));
+    }
+
+    #[test]
+    fn config_without_paths_preserves_the_conventional_root_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true}}"#,
+        )
+        .unwrap();
+        let target = dir.path().join("src/utils.ts");
+        fs::write(&target, "").unwrap();
+        let cfg = load_path_config(dir.path()).unwrap();
+        assert_eq!(
+            resolve_import("@/utils", &dir.path().join("src/main.ts"), Some(&cfg)),
+            Some(target)
+        );
     }
 
     #[test]
@@ -612,7 +557,7 @@ mod tests {
         .unwrap();
 
         let cfg = load_path_config(dir.path()).unwrap();
-        assert!(cfg.aliases.is_empty());
+        assert!(!cfg.matches_alias("src/utils"));
         assert_eq!(
             resolve_import("src/utils", &entry, Some(&cfg)),
             Some(target)
