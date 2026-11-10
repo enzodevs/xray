@@ -24,9 +24,9 @@ Output is designed for agents: compact text or JSON, explicit scope/status, and 
 - **Local dependency trees:** follow imports without opening every file.
 - **Cross-file call traces:** start from one handler or method and follow the path through the project.
 - **Reverse dependencies:** find static file dependents (including same-namespace PHP class references), not runtime callers.
-- **Exact PHP navigation:** query Intelephense definitions and references at a source position.
+- **Exact PHP navigation:** query Intelephense definitions, references, implementations, type definitions, declarations, and direct type hierarchies at a source position.
 - **Frontend structure:** React hooks and JSX trees, plus Vue and Svelte component structure.
-- **Machine-readable output:** compact JSON for digests, dependency trees, reverse lookup, definitions and references; oversized results remain valid JSON with recoverable evidence.
+- **Machine-readable output:** compact JSON for digests, dependency trees, reverse lookup, and position-based navigation; oversized results remain valid JSON with recoverable evidence.
 
 xray parses syntax rather than matching text. It understands TypeScript/JavaScript, Go, Vue, Svelte, Python, PHP, Rust, SQL, and Markdown.
 
@@ -150,8 +150,15 @@ TypeScript and Composer configurations are reused per source directory during re
 | Audit resolution | `xray --explain FILE` | Reports resolved, external, and unresolved dependencies |
 | Resolve a symbol | `xray --definition --at LINE:COL FILE` | Returns exact LSP definition locations |
 | Find symbol uses | `xray --references --at LINE:COL FILE` | Returns server-reported static references |
+| Find implementations | `xray --implementations --at LINE:COL FILE` | Returns PHP implementation locations (premium) |
+| Resolve a symbol's type | `xray --type-definition --at LINE:COL FILE` | Returns PHP type definition locations (premium) |
+| Find a declaration | `xray --declaration --at LINE:COL FILE` | Returns PHP declaration locations (premium) |
+| Find parent types | `xray --supertypes --at LINE:COL FILE` | Returns direct PHP parent types, one hop (premium) |
+| Find child types | `xray --subtypes --at LINE:COL FILE` | Returns direct PHP child types, one hop (premium) |
 | Feed another tool | `xray --format json FILE` | Emits a bounded single-file JSON digest |
 | Bound context | `xray --max-bytes 4096 FILE` | Caps stdout; saves exact overflow privately |
+
+Position-based navigation requires exactly one PHP file and `--at LINE:COL` (one-based line and UTF-8 byte column), and uses LSP automatically. All seven navigation modes support `--format json` and bounded output with exact overflow recovery. The five premium modes require Intelephense premium support; definitions and references remain free. Hierarchy modes report direct relationships only, not a transitive hierarchy; `--depth` does not apply. Results describe the server's static index, never runtime completeness, and these operations do not modify source files.
 
 You can pass more than one file to the regular text modes:
 

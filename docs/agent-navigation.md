@@ -12,27 +12,82 @@ xray --follow --format json app/Jobs/SomeJob.php
 xray --who --format json app/Models/User.php
 xray --definition --at 42:19 app/Jobs/SomeJob.php
 xray --references --at 16:7 --format json app/Models/User.php
+# Intelephense premium (positions below are illustrative):
+xray --implementations --at 14:11 app/Contracts/Payments/PaymentGateway.php
+xray --type-definition --at 35:20 app/Http/Controllers/School/AgentMessageController.php
+xray --declaration --at 35:34 app/Http/Controllers/School/AgentMessageController.php
+xray --supertypes --at 27:7 app/Models/User.php
+xray --subtypes --at 14:11 --format json app/Contracts/Payments/PaymentGateway.php
 ```
 
 Positions are **one-based lines and UTF-8 byte columns** (as in `rg --column`),
 not visual columns or LSP's zero-based UTF-16 coordinates. Place the position
 on the exact identifier: a named argument and a method on the same line may
 share a name but identify different symbols. Xray converts at the LSP boundary.
-Returned end positions are exclusive. Reference queries ask the server to exclude
+Returned end positions are exclusive. Links and hierarchy items use the server's
+selection range; plain LSP locations preserve the server's range, which may span
+a whole declaration (observed for Intelephense type definitions). Xray does not
+invent a narrower identifier range. Reference queries ask the server to exclude
 declarations; exact duplicate locations are removed and results are sorted.
 
-Definition/references currently support **PHP only**, using an installed
-Intelephense server. These queries are independent of legacy `--trace`; PHP recursive
-call tracing is still unsupported. The AST digest's `calls` are lexical hints,
-not resolved graph edges. Never interpret them as an execution sequence.
+Position-based navigation currently supports **PHP only**, using an installed
+Intelephense server. Definition and references are free features. Premium adds:
+
+| Mode | Static question |
+|---|---|
+| `--implementations` | Which concrete implementations does the server resolve for this contract/method? |
+| `--type-definition` | Where is the inferred type of this value declared? |
+| `--declaration` | Where is this symbol declared (as distinguished by the server from its definition)? |
+| `--supertypes` | Which immediate parent types does this type have? |
+| `--subtypes` | Which immediate child types extend/implement this type? |
+
+Hierarchy queries perform one LSP prepare step followed by one relation request
+for **each** prepared type, preserving opaque server data. They return the union
+of direct related-type selection locations, sorted and deduplicated, not a
+recursive graph or proof of transitive coverage. Intelephense may include used
+traits among a PHP class's direct supertypes, alongside its parent and interfaces.
+A union may prepare several
+roots; xray never silently chooses only the first. If the symbol cannot be
+resolved, a ready empty result remains distinct from a capability/transport error.
+
+All modes retain exact byte ranges, text/JSON output, private overflow recovery
+and server-static provenance. They are independent of legacy `--trace`; PHP
+recursive call tracing remains unsupported. The AST digest's `calls` are lexical
+hints, not resolved graph edges. Never interpret them as an execution sequence.
+Premium does not prove which implementation Laravel's container selects at runtime.
+
+### Persistent Intelephense licence
+
+Install the current stable server with your package manager, for example
+`npm install -g intelephense@latest` (or `bun add -g intelephense@latest`). Keep the
+licence in the server's documented default file, `$HOME/intelephense/licence.txt`,
+with directory mode 0700 and file mode 0600. Enter it using a local secure input
+method; do not put the key in repository files, shell arguments, logs or prompts.
+
+Xray detects that file and supplies **only its absolute path** via the documented
+`initializationOptions.licenceKey`. It does not read or serialize the key itself.
+Other clients can use the same documented file, or explicitly configure its path
+if they override the server's defaults. The file is optional: free navigation
+continues to work without it. Premium queries require the server's advertised
+capability and fail explicitly with a licence hint if it is unavailable; they
+never masquerade as an empty result or a structural approximation. Activation
+may require the server to contact its licensing service. Headless activation
+messages are dismissed with the LSP-defined null response, without selecting an
+action, opening a browser or logging potentially sensitive message contents.
+
+Xray remains read-only even with a premium licence: rename, code actions and
+`workspace/applyEdit` are not enabled. See the [official initialization options](https://github.com/bmewburn/intelephense-docs/blob/master/installation.md#initialisation-options)
+and the [LSP type hierarchy protocol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_prepareTypeHierarchy).
 
 ## Language-server lifecycle and limits
 
 On Unix, navigation automatically reuses a private worker for the selected
 Composer workspace (or nearest Git root). Querying a declaration under `vendor`
 retains the consuming application's workspace. Session identity includes the
-Xray executable and server installation, so upgrading either does not reuse an
-old process. `XRAY_INTELEPHENSE` is an optional operator-level executable override,
+Xray executable, server installation and licence-file metadata, so upgrading the
+binary/server or activating, replacing or removing the licence does not reuse an
+old capability negotiation. Only path/metadata enter the session fingerprint,
+never key contents. `XRAY_INTELEPHENSE` is an optional operator-level executable override,
 never a shell command.
 
 Workers/index caches live under `/tmp/xray-lsp-UID` in owned 0700 directories;
@@ -65,7 +120,10 @@ changes preserving both metadata values can be missed until reindexing. Edits
 can therefore cost a cached restart rather than an incremental query.
 
 Client queue/query I/O has a 210-second deadline, individual LSP requests have
-90-second deadlines. Workspace scans retain a 15-second deadline, 500,000 visited
+90-second deadlines. A whole hierarchy query (prepare, all direct relation
+requests and any retry after observed indexing) shares one 90-second deadline,
+and more than 64 prepared roots fails explicitly. Workspace scans retain a
+15-second deadline, 500,000 visited
 entries and 64 directory levels; pruned descendants consume none of that budget.
 On Unix, shared Git enumeration also has a 15-second/16-MiB output bound.
 Exhaustion is an explicit failure, never a complete-looking partial index.

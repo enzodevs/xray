@@ -35,6 +35,27 @@ enum Mode {
     Trace,
     Definition,
     References,
+    Implementations,
+    TypeDefinition,
+    Declaration,
+    Supertypes,
+    Subtypes,
+}
+
+impl Mode {
+    fn navigation(self) -> Option<(navigation::QueryKind, &'static str)> {
+        use navigation::QueryKind;
+        match self {
+            Self::Definition => Some((QueryKind::Definition, "definition")),
+            Self::References => Some((QueryKind::References, "references")),
+            Self::Implementations => Some((QueryKind::Implementations, "implementations")),
+            Self::TypeDefinition => Some((QueryKind::TypeDefinition, "type-definition")),
+            Self::Declaration => Some((QueryKind::Declaration, "declaration")),
+            Self::Supertypes => Some((QueryKind::Supertypes, "supertypes")),
+            Self::Subtypes => Some((QueryKind::Subtypes, "subtypes")),
+            Self::Follow | Self::NoFollow | Self::Who | Self::Trace => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,6 +119,11 @@ fn parse_args(raw: &[String]) -> Result<CliArgs, String> {
             "--trace" => modes.push(Mode::Trace),
             "--definition" => modes.push(Mode::Definition),
             "--references" => modes.push(Mode::References),
+            "--implementations" => modes.push(Mode::Implementations),
+            "--type-definition" => modes.push(Mode::TypeDefinition),
+            "--declaration" => modes.push(Mode::Declaration),
+            "--supertypes" => modes.push(Mode::Supertypes),
+            "--subtypes" => modes.push(Mode::Subtypes),
             "--all" => args.show_all = true,
             "--lsp" => args.use_lsp = true,
             "--explain" | "--stats" => args.explain = true,
@@ -135,7 +161,8 @@ fn parse_args(raw: &[String]) -> Result<CliArgs, String> {
     }
     if modes.len() > 1 {
         return Err(
-            "choose one mode: --follow, --no-follow, --who, --trace, --definition, --references"
+            "choose one mode: --follow, --no-follow, --who, --trace, --definition, --references, \
+             --implementations, --type-definition, --declaration, --supertypes, --subtypes"
                 .into(),
         );
     }
@@ -152,12 +179,20 @@ fn parse_args(raw: &[String]) -> Result<CliArgs, String> {
 }
 
 fn validate_args(args: &CliArgs) -> Result<(), String> {
-    let navigation = matches!(args.mode, Mode::Definition | Mode::References);
-    if navigation && (args.at.is_none() || args.files.len() != 1) {
-        return Err("--definition/--references require --at LINE:COL and exactly one file".into());
+    let navigation = args.mode.navigation();
+    if let Some((_, mode)) = navigation {
+        if args.at.is_none() || args.files.len() != 1 {
+            return Err(format!(
+                "--{mode} requires --at LINE:COL and exactly one file"
+            ));
+        }
     }
-    if args.at.is_some() && !navigation {
-        return Err("--at requires --definition or --references".into());
+    if args.at.is_some() && navigation.is_none() {
+        return Err(
+            "--at requires a navigation mode: --definition, --references, --implementations, \
+                    --type-definition, --declaration, --supertypes, or --subtypes"
+                .into(),
+        );
     }
     if args.depth.is_some() && !matches!(args.mode, Mode::Follow | Mode::Trace) {
         return Err("--depth requires follow or trace mode".into());
@@ -182,7 +217,7 @@ fn validate_args(args: &CliArgs) -> Result<(), String> {
     }
     if args.format == OutputFormat::Json && args.mode == Mode::Trace {
         return Err(
-            "--trace does not support JSON; use definition/references for structured navigation"
+            "--trace does not support JSON; use a position-based mode for structured navigation"
                 .into(),
         );
     }
@@ -286,7 +321,13 @@ fn emit(report: &Report, format: OutputFormat, budget: usize) -> Result<(), Xray
 
 fn process_file(path: &str, args: &CliArgs) -> Result<Report, XrayError> {
     match args.mode {
-        Mode::Definition | Mode::References => navigation_report(path, args),
+        Mode::Definition
+        | Mode::References
+        | Mode::Implementations
+        | Mode::TypeDefinition
+        | Mode::Declaration
+        | Mode::Supertypes
+        | Mode::Subtypes => navigation_report(path, args),
         Mode::NoFollow => {
             let digest = FileDigest::from_path(Path::new(path))?;
             Ok(Report {
@@ -325,17 +366,26 @@ fn navigation_report(path: &str, args: &CliArgs) -> Result<Report, XrayError> {
     let (line, column) = args
         .at
         .ok_or_else(|| XrayError::Lsp("missing position".into()))?;
-    let kind = if args.mode == Mode::Definition {
-        navigation::QueryKind::Definition
-    } else {
-        navigation::QueryKind::References
-    };
-    let mode = if args.mode == Mode::Definition {
-        "definition"
-    } else {
-        "references"
-    };
+    let (kind, mode) = args
+        .mode
+        .navigation()
+        .ok_or_else(|| XrayError::Lsp("not a navigation mode".into()))?;
     let result = navigation::query(Path::new(path), line, column, kind)?;
+    render_navigation_report(path, line, column, mode, &result)
+}
+
+fn render_navigation_report(
+    path: &str,
+    line: usize,
+    column: usize,
+    mode: &str,
+    result: &navigation::NavigationResult,
+) -> Result<Report, XrayError> {
+    let coverage = match mode {
+        "supertypes" => "server-static-index; direct parent types (one hop); not transitive or runtime completeness",
+        "subtypes" => "server-static-index; direct child types (one hop); not transitive or runtime completeness",
+        _ => "server-static-index; not runtime completeness",
+    };
     let status = navigation_status(&result.readiness, result.locations.len(), &result.warnings);
     let mut text = format!(
         "{} {mode} results status={status} provenance={} readiness={}\n",
@@ -366,11 +416,14 @@ fn navigation_report(path: &str, args: &CliArgs) -> Result<Report, XrayError> {
     for warning in &result.warnings {
         let _ = writeln!(text, "warning: {warning}");
     }
-    text.push_str("coverage=server-static-index; absence is not proof of no runtime use; columns=UTF-8-bytes-1-based\n");
+    let _ = writeln!(
+        text,
+        "coverage={coverage}; absence is not proof of no runtime use; columns=UTF-8-bytes-1-based"
+    );
     Ok(Report {
         text,
         json: serde_json::json!({"schema_version":1,"mode":mode,"status":status,
-        "coverage":"server-static-index; not runtime completeness", "position_encoding":"utf-8-bytes-1-based",
+        "coverage":coverage, "position_encoding":"utf-8-bytes-1-based",
         "query":{"file":path,"line":line,"column":column},"count":result.locations.len(),
         "provenance":result.provenance,"readiness":result.readiness,"warnings":result.warnings,"results":result.locations}),
     })
@@ -396,6 +449,11 @@ Modes (choose one):\n\
   --who                 Static file dependents, not runtime callers\n\
   --definition          PHP LSP definition at --at LINE:COL\n\
   --references          PHP LSP references at --at LINE:COL\n\
+  --implementations     PHP LSP implementations at --at LINE:COL (premium)\n\
+  --type-definition     PHP LSP type definition at --at LINE:COL (premium)\n\
+  --declaration         PHP LSP declaration at --at LINE:COL (premium)\n\
+  --supertypes          Direct parent types, one hop, at --at LINE:COL (premium)\n\
+  --subtypes            Direct child types, one hop, at --at LINE:COL (premium)\n\
   --trace               Lexical call tree (PHP unsupported)\n\n\
 Options:\n\
   --at LINE:COL         1-based line and UTF-8 byte column (navigation only)\n\
@@ -582,6 +640,123 @@ mod tests {
             parse_args(&["--definition", "--at", "126:52", "a.php"].map(str::to_string)).unwrap();
         assert!(args.mode == Mode::Definition);
         assert_eq!(args.at, Some((126, 52)));
+    }
+
+    const PREMIUM_MODES: [(&str, Mode); 5] = [
+        ("--implementations", Mode::Implementations),
+        ("--type-definition", Mode::TypeDefinition),
+        ("--declaration", Mode::Declaration),
+        ("--supertypes", Mode::Supertypes),
+        ("--subtypes", Mode::Subtypes),
+    ];
+
+    #[test]
+    fn premium_navigation_modes_select_the_matching_query() {
+        for (flag, mode) in PREMIUM_MODES {
+            let args = parse_args(
+                &[flag, "--at", "12:7", "--format", "json", "a.php"].map(str::to_string),
+            )
+            .unwrap();
+            assert!(args.mode == mode);
+            assert_eq!(args.at, Some((12, 7)));
+            let (kind, name) = args.mode.navigation().unwrap();
+            assert_eq!(name, &flag[2..]);
+            let expected_kind = match mode {
+                Mode::Implementations => "Implementations",
+                Mode::TypeDefinition => "TypeDefinition",
+                Mode::Declaration => "Declaration",
+                Mode::Supertypes => "Supertypes",
+                Mode::Subtypes => "Subtypes",
+                _ => unreachable!(),
+            };
+            assert_eq!(serde_json::to_value(kind).unwrap(), expected_kind);
+        }
+    }
+
+    #[test]
+    fn premium_navigation_rejects_missing_positions_multiple_files_and_irrelevant_options() {
+        for (flag, _) in PREMIUM_MODES {
+            for raw in [
+                vec![flag, "a.php"],
+                vec![flag, "--at", "1:1"],
+                vec![flag, "--at", "1:1", "a.php", "b.php"],
+                vec![flag, "--at", "1:0", "a.php"],
+                vec![flag, "--at", "1:1:1", "a.php"],
+                vec![flag, "--at", "1:1", "--depth", "1", "a.php"],
+                vec![flag, "--at", "1:1", "--all", "a.php"],
+                vec![flag, "--at", "1:1", "--lsp", "a.php"],
+                vec![flag, "--at", "1:1", "--explain", "a.php"],
+                vec![flag, "--at", "1:1", "-s", "Foo", "a.php"],
+                vec![flag, "--at", "1:1", "--references", "a.php"],
+            ] {
+                let raw: Vec<_> = raw.into_iter().map(str::to_string).collect();
+                assert!(parse_args(&raw).is_err(), "{raw:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn premium_reports_preserve_location_schema_and_bounded_exact_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("source.php");
+        std::fs::write(&file, "<?php class Example {}\n").unwrap();
+        let result = navigation::NavigationResult {
+            locations: (1..=100)
+                .map(|line| navigation::NavigationLocation {
+                    file: file.clone(),
+                    line,
+                    column: 7,
+                    end_line: line,
+                    end_column: 14,
+                })
+                .collect(),
+            provenance: "lsp:intelephense".into(),
+            readiness: "ready".into(),
+            warnings: Vec::new(),
+        };
+        for (flag, _) in PREMIUM_MODES {
+            let mode = &flag[2..];
+            let report =
+                render_navigation_report(file.to_str().unwrap(), 1, 13, mode, &result).unwrap();
+            assert_eq!(report.json["mode"], mode);
+            assert_eq!(report.json["status"], "complete");
+            assert_eq!(report.json["count"], 100);
+            assert_eq!(report.json["position_encoding"], "utf-8-bytes-1-based");
+            assert_eq!(
+                report.json["results"][0],
+                serde_json::json!({
+                    "file":file, "line":1, "column":7, "end_line":1, "end_column":14
+                })
+            );
+            assert!(report.text.contains(&format!("100 {mode} results")));
+            let coverage = report.json["coverage"].as_str().unwrap();
+            assert!(coverage.contains("server-static-index"));
+            assert!(
+                coverage.contains("not runtime completeness")
+                    || coverage.contains("not transitive or runtime completeness")
+            );
+            if matches!(mode, "supertypes" | "subtypes") {
+                assert!(coverage.contains("one hop"));
+                assert!(report.text.contains("not transitive"));
+            }
+            let bounded = presentation::bounded_json(report.json.clone(), 1024).unwrap();
+            assert!(bounded.len() <= 1024);
+            let bounded: serde_json::Value = serde_json::from_str(&bounded).unwrap();
+            assert_eq!(bounded["mode"], mode);
+            assert_eq!(bounded["status"], "partial");
+            assert_eq!(bounded["truncation"]["original_status"], "complete");
+            let artifact = Path::new(bounded["truncation"]["artifact"].as_str().unwrap());
+            let recovered: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(artifact).unwrap()).unwrap();
+            assert_eq!(recovered, report.json);
+            std::fs::remove_dir_all(artifact.parent().unwrap()).unwrap();
+
+            let bounded = presentation::bounded_text(&report.text, 1024).unwrap();
+            assert!(bounded.len() <= 1024);
+            let artifact = Path::new(bounded.split("artifact=").nth(1).unwrap().trim());
+            assert_eq!(std::fs::read_to_string(artifact).unwrap(), report.text);
+            std::fs::remove_dir_all(artifact.parent().unwrap()).unwrap();
+        }
     }
 
     #[test]

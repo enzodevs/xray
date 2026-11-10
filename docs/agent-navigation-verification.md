@@ -143,3 +143,67 @@ its separate cold worker/index), returning the exact method location above.
 
 Local temporary evidence: `/tmp/xray-php-{tests,clippy,build}.log` and
 `/tmp/xray-php-validation/` (query output, timings and measurements JSON).
+
+## Licensed PHP navigation and direct type hierarchy
+
+The npm registry's `latest` tag and the installed Intelephense package both
+reported **1.18.5**. No downgrade to an older beta/next tag or unnecessary
+reinstallation was performed. The licence was configured in the documented
+home-directory file with directory/file permissions **0700/0600**, without
+placing key contents in source, CLI arguments, documentation or session identity.
+A real initialization advertised implementation, type-definition, declaration
+and type-hierarchy capabilities. Xray supplies the licence **path**, not its
+contents, and fingerprints only its path/metadata for worker reuse.
+
+The first licensed query uncovered a server/client lifecycle gap: Intelephense
+sent `window/showMessageRequest` after activation; the old unsupported-method
+response caused it to exit, surfacing as `Broken pipe`. Xray now dismisses that
+headless prompt with the protocol-defined null response, never selects an action
+or logs its potentially sensitive message. A mock-server regression covers it.
+
+Verification on the same Redapro checkout, without changing application files:
+
+- `cargo test`: **428 unit tests passed, 1 ignored; 15 CLI tests passed**.
+- `cargo clippy --all-targets -- -D warnings` and `cargo build --release`: passed.
+  An intermediate identical-match-arms lint was fixed by merging null responses.
+- Tests cover premium capability negotiation and explicit missing-capability
+  failures, optional path-only licensing, session identity after activation and
+  replacement, LSP location links, hierarchy prepare/resolve with all roots and
+  opaque data preserved, deduplication, null versus malformed replies, invalid
+  ranges, the 64-root bound, CLI validation and exact bounded-output recovery.
+- Every observed navigation range was checked against real source bytes. The
+  validation harness initially assumed all ranges were single-line identifiers;
+  Intelephense returns a whole class range for the type-definition case. The
+  harness was corrected to validate that declaration range, not narrow or alter
+  the product's exact server output.
+
+| Query | Wall time | Result |
+|---|---:|---|
+| `--implementations --at 14:11 app/Contracts/Payments/PaymentGateway.php`, cold | **16.452 s** | 3 classes: Disabled, Fake and Pagarme payment gateways |
+| Same query, warm | **0.127 s** | Same 3 exact locations |
+| `--implementations --at 16:21` on the contract's `create` method | **0.135 s** | 3 concrete `create` methods |
+| `--subtypes --at 14:11` on the contract | **0.121 s** | Same 3 direct implementing types |
+| `--supertypes --at 27:7 app/Models/User.php` | **0.160 s** | 7 direct relations, including parent, interface and used traits |
+| `--type-definition --at 35:19 app/Http/Controllers/School/AgentMessageController.php` | **0.125 s** | `SendInstitutionalAgentMessage.php:67:1-1673:2`, the whole inferred-type declaration |
+| `--declaration --at 35:33` on that controller | **0.124 s** | `SendInstitutionalAgentMessage.php:100:21-100:27` |
+| Existing `--definition` at the same position | **0.123 s** | Same method location |
+| Existing `--references --at 100:21` on that method | **2.197 s** | 32 uses |
+| `--implementations --at 5:11 vendor/laravel/framework/src/Illuminate/Contracts/Queue/ShouldQueue.php --format json --max-bytes 1024` | **0.124 s** | 48 implementations; bounded JSON and complete private artifact validated |
+
+All these navigation results were `complete`/`ready` in their declared static
+scope. Hierarchy modes are one hop, not transitive traversal. Traits reported as
+supertypes are server semantics, not invented inheritance edges. A paid licence
+does not resolve dynamic container selection or guarantee Laravel magic.
+
+A separate real-server test with an isolated empty `HOME` (no licence, without
+moving or editing the actual key) verified both paths: implementations failed
+explicitly with a premium-licence/capability error (**14.427 s**), while the free
+definition query still returned the exact method (**12.747 s**).
+
+The final release was installed atomically at `/home/rrghost/.local/bin/xray`.
+The PATH-resolved executable returned all three payment gateway implementations
+with exact ranges in **13.08 s** using its separate cold worker. Build and installed
+SHA-256 match: `6449b0b29a8563f7ddc5443902d8b1478b62c4cdf974dde18a89f978924b7d0c`.
+
+Local temporary evidence: `/tmp/xray-premium-{tests,clippy,build}.log`,
+`/tmp/xray-premium-validation/`, and `/tmp/xray-premium-verify.py`.

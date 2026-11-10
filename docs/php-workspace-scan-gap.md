@@ -131,9 +131,10 @@ request and 210-second queue deadlines; neither deadline was increased.
 
 ## Licensing
 
-No Intelephense licence is needed. Definition and references are free features,
-and `docs/agent-navigation-verification.md` records them working on
-Intelephense 1.18.5 without a key. A paid licence adds rename, go to
-implementation, go to type definition, code actions and folding; xray exposes
-none of them. Go to implementation would only become relevant if xray later
-adds an "implementations of this interface" query.
+No Intelephense licence is needed for this workspace-scan fix. Definition and
+references are free features, and `docs/agent-navigation-verification.md` records
+them working on Intelephense 1.18.5 without a key. A subsequent change adds
+optional premium implementation, type-definition, declaration and direct
+hierarchy queries; see [the navigation contract](agent-navigation.md#persistent-intelephense-licence).
+These modes do not change the scan policy or make the existing free modes paid.
+Rename and code actions remain outside xray's read-only scope.

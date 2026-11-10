@@ -18,9 +18,15 @@ use crate::lsp::{self, failure, LspClient};
 pub enum QueryKind {
     Definition,
     References,
+    Implementations,
+    TypeDefinition,
+    Declaration,
+    Supertypes,
+    Subtypes,
 }
 
-/// Exact server selection range, converted to one-based UTF-8 byte positions.
+/// Exact server range, converted to one-based UTF-8 byte positions.
+/// Uses the selection range for links/hierarchy items; plain locations may span a declaration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NavigationLocation {
     pub file: PathBuf,
@@ -48,7 +54,7 @@ struct Request {
     kind: QueryKind,
 }
 
-/// Query PHP definitions or references. Invalid positions and server failures are errors.
+/// Query static PHP locations or direct type relations. Invalid positions and server failures are errors.
 /// `XRAY_INTELEPHENSE` can select an executable path; it is never passed to a shell.
 /// Opened documents are read fresh. Other PHP files and Composer manifests are refreshed
 /// using size/mtime metadata; preserving both can evade change detection. Git-visible files
@@ -168,12 +174,9 @@ impl Workspace {
         let text = self.client.ensure_open(&file)?;
         self.client.wait_for_initial_index()?;
         let character = lsp::byte_to_utf16(&text, request.line - 1, request.column - 1)?;
-        let result = self.client.locations(
-            &file,
-            request.line - 1,
-            character,
-            matches!(request.kind, QueryKind::References),
-        );
+        let result = self
+            .client
+            .locations(&file, request.line - 1, character, request.kind);
         self.client.close(&file)?;
         let locations = result?
             .into_iter()

@@ -72,6 +72,8 @@ fn paths(root: &Path) -> Result<Paths, XrayError> {
         .modified()
         .map_err(|e| failure(e.to_string()))?
         .hash(&mut hash);
+    // Activation/replacement/removal must not reuse a worker's old capability negotiation.
+    hash_licence(crate::lsp::php_licence_file()?.as_deref(), &mut hash)?;
     // Different explicitly selected installations must not silently share a server.
     std::env::var_os("XRAY_INTELEPHENSE").hash(&mut hash);
     std::env::var_os("PATH").hash(&mut hash);
@@ -81,6 +83,24 @@ fn paths(root: &Path) -> Result<Paths, XrayError> {
         socket: directory.join("session.sock"),
         directory,
     })
+}
+
+fn hash_licence(path: Option<&Path>, hash: &mut impl Hasher) -> Result<(), XrayError> {
+    path.hash(hash);
+    if let Some(path) = path {
+        let metadata = path
+            .metadata()
+            .map_err(|e| failure(format!("licence metadata: {e}")))?;
+        metadata.len().hash(hash);
+        metadata
+            .modified()
+            .map_err(|e| failure(e.to_string()))?
+            .hash(hash);
+        metadata.ino().hash(hash);
+        metadata.ctime().hash(hash);
+        metadata.ctime_nsec().hash(hash);
+    }
+    Ok(())
 }
 
 fn lock(path: &Path, deadline: Instant, wait: bool) -> Result<File, XrayError> {
@@ -338,6 +358,27 @@ fn read_exact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn licence_activation_and_replacement_change_session_identity_without_reading_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("licence.txt");
+        let fingerprint = |path| {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            hash_licence(path, &mut hash).unwrap();
+            hash.finish()
+        };
+        let free = fingerprint(None);
+        std::fs::write(&file, "test-only").unwrap();
+        let active = fingerprint(Some(file.as_path()));
+        assert_ne!(free, active);
+        assert_eq!(active, fingerprint(Some(file.as_path())));
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "test-only").unwrap();
+        std::fs::rename(replacement, &file).unwrap();
+        assert_ne!(active, fingerprint(Some(file.as_path())));
+        assert_eq!(free, fingerprint(None));
+    }
 
     #[test]
     fn private_directory_rejects_symlinks_and_public_permissions() {

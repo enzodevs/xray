@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::error::XrayError;
 use crate::lang::LanguageKind;
+use crate::navigation::QueryKind;
 
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) const MAX_MESSAGE: usize = 16 * 1024 * 1024;
@@ -61,7 +62,7 @@ impl LspClient {
         let program = program
             .to_str()
             .ok_or_else(|| failure("Intelephense executable path is not UTF-8"))?;
-        let options = json!({"storagePath":storage,"globalStoragePath":storage});
+        let options = php_initialization_options(storage, php_licence_file()?.as_deref());
         Self::start_command(root, program, &["--stdio"], &options, Some(exclusions))
     }
 
@@ -119,7 +120,13 @@ impl LspClient {
                     "general":{"positionEncodings":["utf-16"]},
                     "window":{"workDoneProgress":true},
                     "workspace":{"configuration":true,"workspaceFolders":true},
-                    "textDocument":{"definition":{"linkSupport":true}}
+                    "textDocument":{
+                        "definition":{"linkSupport":true},
+                        "implementation":{"linkSupport":true},
+                        "typeDefinition":{"linkSupport":true},
+                        "declaration":{"linkSupport":true},
+                        "typeHierarchy":{"dynamicRegistration":false}
+                    }
                 }
             }),
         )?;
@@ -204,7 +211,7 @@ impl LspClient {
     ) -> Result<Option<(PathBuf, usize)>, XrayError> {
         let text = self.ensure_open(file)?;
         let character = byte_to_utf16(&text, line, col)?;
-        let mut locations = self.locations(file, line, character, false)?;
+        let mut locations = self.locations(file, line, character, QueryKind::Definition)?;
         if locations.len() > 1 {
             crate::presentation::warn(format!(
                 "ambiguous LSP trace definition at {}:{}:{} ({} candidates)",
@@ -225,42 +232,72 @@ impl LspClient {
         file: &Path,
         line: usize,
         character: usize,
-        references: bool,
+        kind: QueryKind,
     ) -> Result<Vec<Location>, XrayError> {
-        let capability = if references {
-            "referencesProvider"
-        } else {
-            "definitionProvider"
-        };
+        let (capability, method) = navigation_method(kind);
         if !self
             .capabilities
             .get(capability)
             .is_some_and(|v| v == true || v.is_object())
         {
-            return Err(failure(format!("server does not support {capability}")));
+            let hint = if matches!(kind, QueryKind::Definition | QueryKind::References) {
+                ""
+            } else {
+                "; this query requires an activated Intelephense premium licence"
+            };
+            return Err(failure(format!(
+                "server does not support {capability}{hint}"
+            )));
         }
-        let method = if references {
-            "textDocument/references"
-        } else {
-            "textDocument/definition"
-        };
         let mut params = json!({
             "textDocument":{"uri":path_to_uri(file)?},
             "position":{"line":line,"character":character}
         });
-        if references {
+        if matches!(kind, QueryKind::References) {
             params["context"] = json!({"includeDeclaration":false});
         }
         let deadline = Instant::now() + TIMEOUT;
-        let mut result = self.request_until(method, &params, deadline)?;
-        // Wait only for actual server progress, never a guessed sleep. Requery after indexing.
-        while self.indexing() {
+        loop {
+            let result = if matches!(kind, QueryKind::Supertypes | QueryKind::Subtypes) {
+                self.hierarchy_locations(method, &params, deadline)?
+            } else {
+                parse_locations(&self.request_until(method, &params, deadline)?)?
+            };
+            if !self.indexing() {
+                return Ok(result);
+            }
+            // Reprepare the entire query after observed indexing, including hierarchy items.
             while self.indexing() {
                 self.receive_notification(deadline)?;
             }
-            result = self.request_until(method, &params, deadline)?;
         }
-        parse_locations(&result)
+    }
+
+    fn hierarchy_locations(
+        &mut self,
+        method: &str,
+        position: &Value,
+        deadline: Instant,
+    ) -> Result<Vec<Location>, XrayError> {
+        let prepared =
+            self.request_until("textDocument/prepareTypeHierarchy", position, deadline)?;
+        let items = hierarchy_items(&prepared)?;
+        // A union may prepare multiple roots. Resolve all, or fail explicitly; never pick one.
+        if items.len() > 64 {
+            return Err(failure("type hierarchy exceeds 64 prepared roots"));
+        }
+        let mut locations = Vec::new();
+        for item in items {
+            hierarchy_location(item)?;
+            // Preserve opaque server data unchanged for the second stage.
+            let result = self.request_until(method, &json!({"item":item}), deadline)?;
+            for related in hierarchy_items(&result)? {
+                locations.push(hierarchy_location(related)?);
+            }
+        }
+        locations.sort_unstable();
+        locations.dedup();
+        Ok(locations)
     }
 
     /// Open imports before definition requests, without guessed indexing sleeps.
@@ -416,14 +453,18 @@ impl LspClient {
                             .collect(),
                     )
                 }
-                "client/registerCapability"
+                // Headless clients dismiss UI prompts without choosing an action. Intelephense
+                // uses this after licence activation; rejecting it can terminate the server.
+                // Never echo message contents: activation messages may contain licence data.
+                "window/showMessageRequest"
+                | "client/registerCapability"
                 | "client/unregisterCapability"
                 | "window/workDoneProgress/create" => Value::Null,
                 "workspace/applyEdit" => {
                     json!({"applied":false,"failureReason":"xray is read-only"})
                 }
                 _ => {
-                    return self.send(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"unsupported client method"}}),deadline);
+                    return self.send(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":format!("unsupported client method: {method}")}}),deadline);
                 }
             };
             self.send(&json!({"jsonrpc":"2.0","id":id,"result":result}), deadline)?;
@@ -598,6 +639,83 @@ pub(crate) fn write_until(
         }
     }
     Ok(())
+}
+
+fn navigation_method(kind: QueryKind) -> (&'static str, &'static str) {
+    match kind {
+        QueryKind::Definition => ("definitionProvider", "textDocument/definition"),
+        QueryKind::References => ("referencesProvider", "textDocument/references"),
+        QueryKind::Implementations => ("implementationProvider", "textDocument/implementation"),
+        QueryKind::TypeDefinition => ("typeDefinitionProvider", "textDocument/typeDefinition"),
+        QueryKind::Declaration => ("declarationProvider", "textDocument/declaration"),
+        QueryKind::Supertypes => ("typeHierarchyProvider", "typeHierarchy/supertypes"),
+        QueryKind::Subtypes => ("typeHierarchyProvider", "typeHierarchy/subtypes"),
+    }
+}
+
+fn hierarchy_items(value: &Value) -> Result<&[Value], XrayError> {
+    if value.is_null() {
+        return Ok(&[]);
+    }
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| failure("invalid type hierarchy result"))
+}
+
+fn hierarchy_location(item: &Value) -> Result<Location, XrayError> {
+    if !item["name"].is_string()
+        || !item["kind"]
+            .as_u64()
+            .is_some_and(|kind| (1..=26).contains(&kind))
+    {
+        return Err(failure("invalid type hierarchy item"));
+    }
+    let location = |field: &str| -> Result<Location, XrayError> {
+        parse_locations(&json!({"uri":item["uri"], "range":item[field]}))?
+            .pop()
+            .ok_or_else(|| failure("type hierarchy item omitted location"))
+    };
+    let selection = location("selectionRange")?;
+    let range = location("range")?;
+    if (selection.line, selection.character) < (range.line, range.character)
+        || (selection.end_line, selection.end_character) > (range.end_line, range.end_character)
+    {
+        return Err(failure(
+            "type hierarchy selection lies outside symbol range",
+        ));
+    }
+    Ok(selection)
+}
+
+/// Pass a file path, never the licence contents, through initialization or logs.
+fn php_initialization_options(storage: &Path, licence: Option<&Path>) -> Value {
+    let mut options = json!({"storagePath":storage,"globalStoragePath":storage});
+    if let Some(licence) = licence {
+        options["licenceKey"] = json!(licence);
+    }
+    options
+}
+
+pub(crate) fn php_licence_file() -> Result<Option<PathBuf>, XrayError> {
+    std::env::var_os("HOME").map_or(Ok(None), |home| licence_file_in(Path::new(&home)))
+}
+
+fn licence_file_in(home: &Path) -> Result<Option<PathBuf>, XrayError> {
+    if !home.is_absolute() {
+        return Err(failure(
+            "HOME must be absolute to locate the Intelephense licence",
+        ));
+    }
+    let path = home.join("intelephense/licence.txt");
+    match path.metadata() {
+        Ok(metadata) if metadata.is_file() => Ok(Some(path)),
+        Ok(_) => Err(failure("Intelephense licence path is not a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(failure(format!(
+            "cannot inspect Intelephense licence file: {error}"
+        ))),
+    }
 }
 
 /// The scanner supplies literal exclusions, including Git-ignored generated trees.
@@ -876,6 +994,17 @@ mod tests {
     use super::*;
 
     fn mock(script: &str) -> (tempfile::TempDir, LspClient) {
+        mock_with_capabilities(
+            script,
+            &json!({"definitionProvider":true,"referencesProvider":true}),
+        )
+    }
+
+    fn mock_with_capabilities(
+        script: &str,
+        capabilities: &Value,
+    ) -> (tempfile::TempDir, LspClient) {
+        let capabilities = capabilities.to_string();
         let root = tempfile::tempdir().unwrap();
         let code = format!(
             r"
@@ -896,7 +1025,7 @@ def send(msg):
     sys.stdout.buffer.flush()
 
 init=read()
-send({{'jsonrpc':'2.0','id':init['id'],'result':{{'capabilities':{{'definitionProvider':True,'referencesProvider':True}}}}}})
+send({{'jsonrpc':'2.0','id':init['id'],'result':{{'capabilities':json.loads({capabilities:?})}}}})
 read()
 {script}
 "
@@ -910,6 +1039,163 @@ read()
         )
         .unwrap();
         (root, client)
+    }
+
+    #[test]
+    fn headless_activation_prompt_is_dismissed_without_selecting_an_action() {
+        let (_root, mut client) = mock(
+            r"
+q=read()
+send({'jsonrpc':'2.0','id':'prompt','method':'window/showMessageRequest','params':{'type':3,'message':'activation notice','actions':[{'title':'Open browser'}]}})
+answer=read()
+assert answer['id']=='prompt' and answer['result'] is None and 'error' not in answer
+send({'id':q['id'],'result':[]})",
+        );
+        assert_eq!(client.request("test", &Value::Null).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn licence_is_optional_and_initialization_uses_only_its_path() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(licence_file_in(home.path()).unwrap().is_none());
+        assert!(php_initialization_options(home.path(), None)
+            .get("licenceKey")
+            .is_none());
+        std::fs::create_dir(home.path().join("intelephense")).unwrap();
+        let file = home.path().join("intelephense/licence.txt");
+        std::fs::write(&file, "test-only-not-a-real-key").unwrap();
+        let found = licence_file_in(home.path()).unwrap().unwrap();
+        let options = php_initialization_options(home.path(), Some(&found));
+        assert_eq!(options["licenceKey"], json!(file));
+        assert!(!options.to_string().contains("test-only-not-a-real-key"));
+        assert!(licence_file_in(Path::new("relative-home")).is_err());
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(licence_file_in(home.path())
+            .unwrap_err()
+            .to_string()
+            .contains("regular file"));
+    }
+
+    #[test]
+    fn premium_modes_fail_explicitly_without_capability_while_free_queries_work() {
+        let (root, mut client) = mock("q=read(); assert q['method']=='textDocument/definition'; send({'id':q['id'],'result':None})");
+        for kind in [
+            QueryKind::Implementations,
+            QueryKind::TypeDefinition,
+            QueryKind::Declaration,
+            QueryKind::Supertypes,
+            QueryKind::Subtypes,
+        ] {
+            let error = client
+                .locations(&root.path().join("source.php"), 0, 0, kind)
+                .unwrap_err();
+            assert!(error.to_string().contains("premium licence"));
+        }
+        assert!(client
+            .locations(&root.path().join("source.php"), 0, 0, QueryKind::Definition)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn premium_location_modes_use_negotiated_methods_and_selection_ranges() {
+        for kind in [
+            QueryKind::Implementations,
+            QueryKind::TypeDefinition,
+            QueryKind::Declaration,
+        ] {
+            let (capability, method) = navigation_method(kind);
+            let mut capabilities = json!({});
+            capabilities[capability] = json!({});
+            let script = format!(
+                r"
+q=read()
+assert q['method']=={method:?}
+assert q['params']['position']=={{'line':2,'character':4}}
+r={{'start':{{'line':3,'character':5}},'end':{{'line':3,'character':9}}}}
+send({{'id':q['id'],'result':[{{'targetUri':q['params']['textDocument']['uri'],'targetRange':r,'targetSelectionRange':r}}]}})"
+            );
+            let (root, mut client) = mock_with_capabilities(&script, &capabilities);
+            let locations = client
+                .locations(&root.path().join("source.php"), 2, 4, kind)
+                .unwrap();
+            assert_eq!(locations.len(), 1);
+            assert_eq!((locations[0].line, locations[0].character), (3, 5));
+        }
+    }
+
+    #[test]
+    fn hierarchy_resolves_all_prepared_roots_preserves_data_and_deduplicates() {
+        for kind in [QueryKind::Supertypes, QueryKind::Subtypes] {
+            let (_, method) = navigation_method(kind);
+            let script = format!(
+                r"
+q=read()
+assert q['method']=='textDocument/prepareTypeHierarchy'
+r={{'start':{{'line':0,'character':0}},'end':{{'line':4,'character':10}}}}
+s={{'start':{{'line':1,'character':6}},'end':{{'line':1,'character':9}}}}
+item={{'name':'Foo','kind':5,'uri':q['params']['textDocument']['uri'],'range':r,'selectionRange':s,'data':{{'opaque':[42,'retain']}}}}
+send({{'id':q['id'],'result':[item,item]}})
+for i in range(2):
+ q=read()
+ assert q['method']=={method:?}
+ assert q['params']['item']==item
+ send({{'id':q['id'],'result':[item,item]}})"
+            );
+            let (root, mut client) =
+                mock_with_capabilities(&script, &json!({"typeHierarchyProvider":true}));
+            let locations = client
+                .locations(&root.path().join("source.php"), 0, 0, kind)
+                .unwrap();
+            assert_eq!(locations.len(), 1);
+            assert_eq!(
+                (
+                    locations[0].line,
+                    locations[0].character,
+                    locations[0].end_character
+                ),
+                (1, 6, 9)
+            );
+        }
+    }
+
+    #[test]
+    fn hierarchy_empty_invalid_and_oversized_results_are_distinct() {
+        for value in ["None", "[]"] {
+            let script = format!("q=read(); send({{'id':q['id'],'result':{value}}})");
+            let (root, mut client) =
+                mock_with_capabilities(&script, &json!({"typeHierarchyProvider":true}));
+            assert!(client
+                .locations(&root.path().join("source.php"), 0, 0, QueryKind::Subtypes)
+                .unwrap()
+                .is_empty());
+        }
+        for (value, message) in [
+            ("{}", "invalid type hierarchy result"),
+            ("[{}]", "invalid type hierarchy item"),
+            ("[{}]*65", "64 prepared roots"),
+        ] {
+            let script = format!("q=read(); send({{'id':q['id'],'result':{value}}})");
+            let (root, mut client) =
+                mock_with_capabilities(&script, &json!({"typeHierarchyProvider":true}));
+            assert!(client
+                .locations(&root.path().join("source.php"), 0, 0, QueryKind::Supertypes)
+                .unwrap_err()
+                .to_string()
+                .contains(message));
+        }
+    }
+
+    #[test]
+    fn hierarchy_rejects_selection_outside_symbol_range() {
+        let item = json!({"name":"Foo","kind":5,"uri":"file:///tmp/source.php",
+            "range":{"start":{"line":1,"character":0},"end":{"line":2,"character":0}},
+            "selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}}});
+        assert!(hierarchy_location(&item)
+            .unwrap_err()
+            .to_string()
+            .contains("outside symbol range"));
     }
 
     #[test]
@@ -1060,7 +1346,7 @@ read()
     fn references_exclude_declarations_and_keep_empty_results_explicit() {
         let (root, mut client) = mock("q=read(); assert q['method']=='textDocument/references'; assert q['params']['context']['includeDeclaration'] is False; send({'id':q['id'],'result':[]})");
         assert!(client
-            .locations(&root.path().join("file.php"), 0, 0, true)
+            .locations(&root.path().join("file.php"), 0, 0, QueryKind::References)
             .unwrap()
             .is_empty());
     }

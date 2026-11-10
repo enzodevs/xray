@@ -23,9 +23,16 @@ xray --trace <file> -s <name>    # trace a specific symbol
 xray --no-follow <file>          # single-file structural digest
 xray --definition --at L:C <file> # exact LSP definition; 1-based UTF-8 byte column
 xray --references --at L:C <file> # static symbol references (including PHP)
+xray --implementations --at L:C <file> # PHP implementations (Intelephense premium)
+xray --type-definition --at L:C <file> # PHP type definition (premium)
+xray --declaration --at L:C <file> # PHP declaration (premium)
+xray --supertypes --at L:C <file> # direct parent types, one hop (premium)
+xray --subtypes --at L:C <file>   # direct child types, one hop (premium)
 xray --follow --format json <file> # structured dependency tree
 xray --max-bytes 4096 <file>      # bounded output + private exact overflow
 ```
+
+Position-based navigation requires exactly one PHP file and uses LSP automatically. All navigation modes support bounded text/JSON and exact overflow recovery. Hierarchy queries are one-hop static relationships, not transitive or runtime completeness; `--depth` does not apply. These modes never edit source files.
 
 ## Architecture
 

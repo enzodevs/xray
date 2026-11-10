@@ -41,6 +41,55 @@ fn argument_and_file_failures_are_machine_readable_and_nonzero() {
 }
 
 #[test]
+fn premium_navigation_validation_is_machine_readable_before_server_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    for mode in [
+        "--implementations",
+        "--type-definition",
+        "--declaration",
+        "--supertypes",
+        "--subtypes",
+    ] {
+        for args in [
+            vec![mode, "--format", "json", "file.php"],
+            vec![mode, "--format", "json", "--at", "1:1", "a.php", "b.php"],
+        ] {
+            let output = run(dir.path(), &args);
+            assert!(!output.status.success());
+            let data = json(&output);
+            assert_eq!(data["status"], "failed");
+            assert_eq!(data["target"], "arguments");
+            assert_eq!(
+                data["error"],
+                format!("{mode} requires --at LINE:COL and exactly one file")
+            );
+        }
+    }
+}
+
+#[test]
+fn help_documents_premium_navigation_and_direct_hierarchy_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run(dir.path(), &["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--implementations",
+        "--type-definition",
+        "--declaration",
+        "--supertypes",
+        "--subtypes",
+    ] {
+        let line = help.lines().find(|line| line.contains(flag)).unwrap();
+        assert!(line.contains("--at LINE:COL"), "{line}");
+        assert!(line.contains("premium"), "{line}");
+        if matches!(flag, "--supertypes" | "--subtypes") {
+            assert!(line.contains("one hop"), "{line}");
+        }
+    }
+}
+
+#[test]
 fn syntax_recovery_is_partial_not_a_successful_completeness_claim() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("broken.php"), "<?php function broken(").unwrap();
