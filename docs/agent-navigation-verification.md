@@ -96,3 +96,50 @@ python3 scripts/stress_xray.py --binary target/release/xray \
 See [the navigation contract](agent-navigation.md) for position units, freshness,
 output recovery and limitations. PHP tracing, Eloquent magic, macros, runtime
 container bindings and resource-route expansion are not claimed complete.
+
+## PHP workspace scan fix: redapro-whitelabel
+
+Validated the fix described in [php-workspace-scan-gap.md](php-workspace-scan-gap.md)
+on `/home/rrghost/SoftEng/redapro/redapro-whitelabel`, using the release build.
+No application files were changed and no application/Artisan code was executed.
+The configured Fluxomind directory remains unavailable on this machine.
+
+- `cargo test`: **417 passed, 1 ignored** unit tests; **13 passed** CLI tests.
+- `cargo clippy --all-targets -- -D warnings`: passed after fixing a doc-comment
+  backtick warning in the first run.
+- `cargo build --release` and `git diff --check`: passed.
+- Regression tests use a 12-entry cap with 100 ignored runtime files, ignored
+  generated PHP, a tracked `.gitignore` placeholder and retained vendor PHP.
+  Editing generated PHP leaves the snapshot unchanged; exceeding a smaller cap
+  fails explicitly. Nested ignores, tracked ignored files, negations, symlinks,
+  glob escaping, nested Composer roots and broken indexes are also covered.
+- The existing non-Git freshness and vendor-workspace-root tests still pass.
+
+| Release query | Wall time | Observed result |
+|---|---:|---|
+| `--references --at 100:21 app/Actions/InstitutionalAgents/SendInstitutionalAgentMessage.php`, cold worker/index | **20.550 s** | 32 references, complete, ready |
+| Same query, warm session | **1.991 s** | Same 32 references, complete, ready |
+| `--definition --at 35:34 app/Http/Controllers/School/AgentMessageController.php` | **0.135 s** | `SendInstitutionalAgentMessage.php:100:21-100:27` |
+| Same definition, repeated | **0.126 s** | Same exact location |
+| `--definition --at 10:47 app/Jobs/RecoverTrailChapterJob.php` | **0.122 s** | Vendor `ShouldQueue.php:5:11-5:22` |
+| `--references --at 5:11 vendor/laravel/framework/src/Illuminate/Contracts/Queue/ShouldQueue.php` | **0.216 s** | 106 references, including the consuming application's jobs |
+| `--no-follow` on the original target | **0.025 s** | PHP outline, 1,673 lines |
+| Default follow on the original target | **0.166 s** | Complete; 48 resolved, 20 external, 0 unresolved |
+| `--who` on the original target | **3.842 s** | 14 dependents; explicitly partial, 3,070 scanned, 2 parser-recovered files |
+
+All navigation locations above were checked against the actual source byte
+ranges: method ranges contain `handle`; vendor definition/reference ranges end
+in `ShouldQueue`. The first vendor validation assertion had an off-by-one expected
+column (46 instead of 47); inspection and the corrected range check passed,
+without a product-code change. No reference output was truncated.
+The 90-second LSP and 210-second queue deadlines were **not increased**.
+These measurements are local observations, not runtime-completeness guarantees.
+
+The release binary was installed atomically at `/home/rrghost/.local/bin/xray`,
+the executable resolved by `command -v xray`. Its SHA-256 matches the build:
+`c051ad35db722e74bc539f5f6befe611bc47e35e7dd097f9b1fc9edc2241afa0`.
+A definition query through that global executable also passed (**13.19 s** with
+its separate cold worker/index), returning the exact method location above.
+
+Local temporary evidence: `/tmp/xray-php-{tests,clippy,build}.log` and
+`/tmp/xray-php-validation/` (query output, timings and measurements JSON).

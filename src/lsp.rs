@@ -52,13 +52,17 @@ impl LspClient {
         Self::start_command(root, &program, args, &options, None)
     }
 
-    pub(crate) fn start_php(root: &Path, storage: &Path) -> Result<Self, XrayError> {
+    pub(crate) fn start_php(
+        root: &Path,
+        storage: &Path,
+        exclusions: &[String],
+    ) -> Result<Self, XrayError> {
         let program = php_executable()?;
         let program = program
             .to_str()
             .ok_or_else(|| failure("Intelephense executable path is not UTF-8"))?;
         let options = json!({"storagePath":storage,"globalStoragePath":storage});
-        Self::start_command(root, program, &["--stdio"], &options, Some(storage))
+        Self::start_command(root, program, &["--stdio"], &options, Some(exclusions))
     }
 
     fn start_command(
@@ -66,7 +70,7 @@ impl LspClient {
         program: &str,
         args: &[&str],
         initialization_options: &Value,
-        storage: Option<&Path>,
+        exclusions: Option<&[String]>,
     ) -> Result<Self, XrayError> {
         let mut command = Command::new(program);
         command
@@ -97,7 +101,7 @@ impl LspClient {
             next_id: 1,
             opened_files: HashMap::new(),
             capabilities: Value::Null,
-            configuration: storage.map_or(Value::Null, |_| php_configuration()),
+            configuration: exclusions.map_or(Value::Null, php_configuration),
             progress: std::collections::HashSet::new(),
             index_tokens: std::collections::HashSet::new(),
             index_completed: false,
@@ -144,9 +148,14 @@ impl LspClient {
         Ok(client)
     }
 
-    pub(crate) fn restart_php(&mut self, root: &Path, storage: &Path) -> Result<(), XrayError> {
+    pub(crate) fn restart_php(
+        &mut self,
+        root: &Path,
+        storage: &Path,
+        exclusions: &[String],
+    ) -> Result<(), XrayError> {
         self.stop();
-        *self = Self::start_php(root, storage)?;
+        *self = Self::start_php(root, storage, exclusions)?;
         Ok(())
     }
 
@@ -591,14 +600,13 @@ pub(crate) fn write_until(
     Ok(())
 }
 
-/// Retain documented server defaults, but exclude hidden caches like the freshness scanner.
-/// Vendor remains indexed: Laravel navigation needs dependency declarations and `PHPDoc` types.
-fn php_configuration() -> Value {
-    json!({"intelephense":{"files":{"exclude":[
-        "**/.*/**", "**/.git/**", "**/.svn/**", "**/.hg/**", "**/CVS/**",
-        "**/.DS_Store/**", "**/node_modules/**", "**/bower_components/**",
-        "**/vendor/**/{Tests,tests}/**", "**/.history/**", "**/vendor/**/vendor/**"
-    ]}}})
+/// The scanner supplies literal exclusions, including Git-ignored generated trees.
+/// Override defaults (including phtml associations) so index and freshness share scope.
+fn php_configuration(exclusions: &[String]) -> Value {
+    json!({"intelephense":{"files":{
+        "exclude":exclusions,
+        "associations":["*.[pP][hH][pP]"]
+    }}})
 }
 
 fn configuration_section(configuration: &Value, section: Option<&str>) -> Value {
@@ -976,12 +984,21 @@ read()
 
     #[test]
     fn php_configuration_excludes_hidden_caches_but_keeps_vendor_types() {
-        let settings = php_configuration();
+        let settings = php_configuration(&[
+            "**/.*/**".into(),
+            "**/node_modules/**".into(),
+            "generated/**".into(),
+        ]);
         let excludes = configuration_section(&settings, Some("intelephense.files.exclude"));
         let patterns = excludes.as_array().unwrap();
         assert!(patterns.contains(&json!("**/.*/**")));
         assert!(patterns.contains(&json!("**/node_modules/**")));
         assert!(!patterns.contains(&json!("**/vendor/**")));
+        assert!(patterns.contains(&json!("generated/**")));
+        assert_eq!(
+            settings["intelephense"]["files"]["associations"],
+            json!(["*.[pP][hH][pP]"])
+        );
         assert_eq!(
             configuration_section(&settings, Some("intelephense")),
             settings["intelephense"]

@@ -2,6 +2,7 @@
 mod error;
 mod extract;
 mod follow;
+mod git_files;
 mod lang;
 #[cfg_attr(not(unix), path = "lsp_unsupported.rs")]
 mod lsp;
@@ -9,6 +10,8 @@ mod model;
 mod navigation;
 mod output;
 mod parser;
+#[cfg(unix)]
+mod php_workspace;
 mod presentation;
 mod project;
 mod resolve;

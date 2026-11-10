@@ -42,18 +42,34 @@ fixed sleep or caller polling. A query can take about a minute on a cold large
 project. `readiness=ready` means initial server-reported indexing ended and the
 query responded, not that the server understands every Laravel convention.
 
-Intelephense keeps its documented default exclusions and additionally excludes
-hidden directories: generated PHP caches must not dominate indexing or introduce
-stale duplicate symbols. Vendor types remain available. Between queries, a
-bounded metadata scan checks PHP files and Composer manifests (including vendor);
-hidden directories, `node_modules` and symlinks are excluded.
-Changes restart the server against its cache and await indexing again. This is
+Between queries, a bounded metadata scan checks Git-visible PHP files and
+Composer manifests (tracked plus non-ignored untracked files), plus the workspace's
+`vendor` tree even when Git ignores it. Hidden directories, `node_modules` and
+symlinks remain excluded. Directories without visible PHP/Composer files are
+pruned before descent; tracked `.gitignore` placeholders do not force a walk of
+runtime trees. Nested Git ignores, negations and tracked-file overrides follow
+Git's own rules, including for Composer roots nested in a larger repository.
+A broken Git index fails explicitly, never falling back to an unfiltered scan.
+Without a Git repository, the bounded filesystem walk remains available.
+
+The same scan generates literal Intelephense exclusions, replacing its default
+exclusion list; vendor tests and nested vendor declarations are no longer indexed
+and refreshed under different policies. Associations are restricted to PHP
+(case-insensitive), rather than also indexing untracked-for-freshness `.phtml`
+files. Ignored generated PHP is neither refreshed nor indexed. Composer manifests
+are freshness inputs, not PHP source. Changes to included files or the computed
+exclusions restart the server against its cache and await indexing again.
+Editing files inside pruned runtime trees does not cause a restart. This is
 **size/mtime freshness**, not a content-hash guarantee or continuous watcher;
 changes preserving both metadata values can be missed until reindexing. Edits
 can therefore cost a cached restart rather than an incremental query.
 
 Client queue/query I/O has a 210-second deadline, individual LSP requests have
-90-second deadlines, shutdown has a two-second deadline, documents are limited
+90-second deadlines. Workspace scans retain a 15-second deadline, 500,000 visited
+entries and 64 directory levels; pruned descendants consume none of that budget.
+On Unix, shared Git enumeration also has a 15-second/16-MiB output bound.
+Exhaustion is an explicit failure, never a complete-looking partial index.
+Shutdown has a two-second deadline, documents are limited
 to 8 MiB and protocol messages to 16 MiB. Server edits are refused. Failures are
 not empty results; broken transports are not reused. Legacy trace exposes LSP
 fallback errors as bounded partial-result warnings and stops retrying a broken

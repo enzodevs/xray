@@ -1,6 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 use crate::error::XrayError;
@@ -263,69 +264,30 @@ const SKIP_DIRS: &[&str] = &[
 
 /// Recursively walk supported source files under a directory.
 fn walk_project_files(dir: &Path, callback: &mut dyn FnMut(&Path)) -> Result<(), XrayError> {
-    // Use Git's ignore semantics, including nested ignore files and untracked
-    // source. NUL-separated names preserve spaces and non-UTF-8 filenames.
-    let listing = Command::new("git")
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--full-name",
-            "-z",
-        ])
-        .current_dir(dir)
-        .output();
-    if let Ok(output) = listing {
-        if output.status.success() {
-            let mut paths = BTreeSet::new();
-            for name in output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|name| !name.is_empty())
-            {
-                #[cfg(unix)]
-                let name = {
-                    use std::os::unix::ffi::OsStrExt;
-                    std::ffi::OsStr::from_bytes(name)
-                };
-                #[cfg(not(unix))]
-                let Some(name) = std::str::from_utf8(name).ok().map(std::ffi::OsStr::new) else {
-                    continue;
-                };
-                let relative = Path::new(name);
-                if relative.parent().is_some_and(|parent| {
-                    parent
-                        .components()
-                        .any(|part| should_skip_dir(&part.as_os_str().to_string_lossy()))
-                }) {
-                    continue;
-                }
-                let path = dir.join(relative);
-                if path.is_file()
-                    && !path
-                        .ancestors()
-                        .take_while(|ancestor| *ancestor != dir)
-                        .any(Path::is_symlink)
-                    && path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(lang::is_supported_extension)
-                {
-                    paths.insert(path);
-                }
+    if let Some(paths) = crate::git_files::visible(dir)? {
+        for path in paths {
+            let relative = path.strip_prefix(dir).unwrap_or(&path);
+            if relative.parent().is_some_and(|parent| {
+                parent
+                    .components()
+                    .any(|part| should_skip_dir(&part.as_os_str().to_string_lossy()))
+            }) {
+                continue;
             }
-            for path in paths {
+            if path.is_file()
+                && !path
+                    .ancestors()
+                    .take_while(|ancestor| *ancestor != dir)
+                    .any(Path::is_symlink)
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(lang::is_supported_extension)
+            {
                 callback(&path);
             }
-            return Ok(());
         }
-    }
-    if dir.join(".git").exists() {
-        return Err(XrayError::ParseFailed(format!(
-            "cannot enumerate Git files in {}; refusing an unfiltered reverse scan",
-            dir.display(),
-        )));
+        return Ok(());
     }
     // Non-Git directories are used by the standalone scanner's unit tests.
     // Production --who resolves the Git root before reaching this function.
