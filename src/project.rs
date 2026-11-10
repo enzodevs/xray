@@ -189,6 +189,7 @@ fn is_external_specifier(
                 && !path_config.is_some_and(|config| config.matches_alias(specifier))
         }
         LanguageKind::Go | LanguageKind::Py => !specifier.starts_with('.'),
+        LanguageKind::Php if specifier.starts_with("inertia:") => false,
         LanguageKind::Php | LanguageKind::Rs => {
             !specifier.starts_with('.')
                 && specifier != "crate"
@@ -279,6 +280,55 @@ mod tests {
             graph.dependencies(&entry, Some(&wrong_config)).unwrap(),
             vec![dir.path().join("b/value.ts").canonicalize().unwrap()]
         );
+    }
+
+    #[test]
+    fn inertia_dependencies_keep_missing_and_ambiguous_pages_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("composer.json"), "{}").unwrap();
+        for name in [
+            "pages/Home.vue",
+            "pages/Duplicate.vue",
+            "Pages/Duplicate.vue",
+        ] {
+            let path = dir.path().join("resources/js").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "<template>Page</template>").unwrap();
+        }
+        let entry = dir.path().join("Controller.php");
+        fs::write(
+            &entry,
+            r"<?php use Inertia\Inertia;
+            Inertia::render('Home'); Inertia::render('Missing');
+            Inertia::render('Duplicate'); Inertia::render('../Outside');",
+        )
+        .unwrap();
+        let mut graph = ProjectGraph::new();
+        assert_eq!(
+            graph.dependencies(&entry, None).unwrap(),
+            vec![dir
+                .path()
+                .join("resources/js/pages/Home.vue")
+                .canonicalize()
+                .unwrap()]
+        );
+        assert_eq!(graph.stats().resolved, 1);
+        assert_eq!(graph.stats().unresolved, 3);
+        assert_eq!(graph.stats().external, 1); // Inertia facade itself is a vendor class.
+        for diagnostic in graph
+            .diagnostics()
+            .iter()
+            .filter(|d| d.specifier.starts_with("inertia:"))
+        {
+            assert_eq!(
+                diagnostic.status,
+                if diagnostic.specifier == "inertia:Home" {
+                    ResolutionStatus::Resolved
+                } else {
+                    ResolutionStatus::Unresolved
+                }
+            );
+        }
     }
 
     #[test]

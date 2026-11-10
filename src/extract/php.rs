@@ -1,4 +1,6 @@
+pub(crate) mod conventions;
 mod dependencies;
+mod inertia;
 mod structure;
 
 #[cfg(test)]
@@ -12,6 +14,7 @@ use crate::util::{trim_quotes, txt};
 pub(super) fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
     let mut symbols = super::empty_symbols();
     dependencies::collect(root, src, &mut symbols);
+    inertia::collect(root, src, &mut symbols.imports);
     collect_top_level(root, src, &mut symbols);
     structure::collect(root, src, &mut symbols);
     symbols
@@ -20,6 +23,7 @@ pub(super) fn extract_symbols(root: Node, src: &[u8]) -> FileSymbols {
 pub(super) fn extract_sources_only(root: Node, src: &[u8]) -> Vec<String> {
     let mut symbols = super::empty_symbols();
     dependencies::collect(root, src, &mut symbols);
+    inertia::collect(root, src, &mut symbols.imports);
     symbols.imports
 }
 

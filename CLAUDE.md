@@ -43,9 +43,13 @@ Position-based navigation requires exactly one PHP file and uses LSP automatical
 | `follow.rs` | `--follow` (default): tree building, noise detection, rendering |
 | `trace.rs` | `--trace`: cross-file call graph traversal + rendering + LSP fallback |
 | `lsp.rs` | Deadline-bounded LSP transport, positions/URIs, server capabilities and definitions/references |
-| `navigation.rs` | Exact position queries and reusable workspace LSP sessions |
+| `navigation.rs` | Exact position queries and reusable workspace LSP sessions; separate convention result types |
+| `php_conventions.rs` | Bounded Git-visible PHP convention scan; candidates never become exact LSP references |
+| `extract/php/conventions.rs` | Syntactic scopes, Job handlers and listener event candidates |
+| `extract/php/inertia.rs` | Literal namespace-resolved Inertia render dependencies |
 | `presentation.rs` | AXI byte caps, valid compact JSON, private exact overflow artifacts |
-| `reverse.rs` | `--who`: Git-aware source enumeration, directory-scoped config reuse, find importers (TS + Go + Python + PHP + Rust + SQL + Markdown links) |
+| `reverse.rs` | `--who`: Git-aware enumeration, fresh directory-scoped resolution, named recovery evidence, importers including conventional Inertia pages |
+| `reverse_cache.rs` | Private bounded parse-fact cache; resolved edges and Git visibility are not cached |
 | `resolve.rs` | Facade module re-exporting `resolve::ts`, `resolve::go`, `resolve::py`, `resolve::php`, `resolve::rs`, `resolve::sql`, and `resolve::markdown` |
 | `resolve/ts.rs` | Local TS/JS import resolution; Oxc-backed inherited JSONC/tsconfig paths via `load_path_config` |
 | `resolve/go.rs` | Go import resolution: `go.mod` module paths + relative packages; enumerate all non-test package sources for follow |

@@ -36,6 +36,29 @@ pub struct NavigationLocation {
     pub end_column: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ConventionCandidate {
+    pub kind: String,
+    pub subject: String,
+    pub provenance: String,
+    #[serde(flatten)]
+    pub location: NavigationLocation,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ConventionResult {
+    pub kind: String,
+    pub target_class: String,
+    pub status: String,
+    pub coverage: String,
+    pub count: usize,
+    pub omitted: usize,
+    pub scanned: usize,
+    pub parser_recovery_files: Vec<PathBuf>,
+    pub warnings: Vec<String>,
+    pub results: Vec<ConventionCandidate>,
+}
+
 /// Server-reported static locations, never a guarantee of runtime completeness.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NavigationResult {
@@ -43,6 +66,8 @@ pub struct NavigationResult {
     pub provenance: String,
     pub readiness: String,
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conventions: Option<Box<ConventionResult>>,
 }
 
 #[cfg(unix)]
@@ -199,11 +224,32 @@ impl Workspace {
                 })
             })
             .collect::<Result<Vec<_>, XrayError>>()?;
+        let mut warnings = Vec::new();
+        let conventions = if matches!(request.kind, QueryKind::References) {
+            match crate::php_conventions::collect(
+                root,
+                &file,
+                request.line,
+                request.column,
+                &locations,
+            ) {
+                Ok(report) => report.map(Box::new),
+                Err(error) => {
+                    warnings.push(format!(
+                        "convention analysis failed; exact LSP locations retained: {error}"
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(NavigationResult {
             locations,
             provenance: "lsp:intelephense".into(),
             readiness: "ready".into(),
-            warnings: Vec::new(),
+            warnings,
+            conventions,
         })
     }
 }

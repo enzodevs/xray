@@ -92,7 +92,19 @@ pub fn run(
     } else {
         "complete"
     };
+    let inertia = graph
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.specifier.starts_with("inertia:"));
+    let coverage = if inertia {
+        "static dependencies within depth; includes conventional Inertia Vue page links; custom page resolvers not evaluated; not runtime calls"
+    } else {
+        "static dependencies within depth; not runtime calls"
+    };
     let mut text = format!("follow status={status} depth={} resolved={} external={} unresolved={} parser_recovery_files={}\n", config.max_depth, resolution.resolved, resolution.external, resolution.unresolved, recovered.len());
+    if inertia {
+        let _ = writeln!(text, "coverage: {coverage}");
+    }
     text.push_str(&digest_text);
     if !children.is_empty() || !omitted.is_empty() {
         text.push_str("│\n");
@@ -111,7 +123,7 @@ pub fn run(
     Ok(crate::presentation::Report {
         text,
         json: serde_json::json!({"schema_version": 1, "mode": "follow", "status": status,
-            "coverage": "static dependencies within depth; not runtime calls", "depth": config.max_depth,
+            "coverage": coverage, "depth": config.max_depth,
             "file": digest_json["file"], "results": children, "noise_omitted": omitted,
             "resolution": resolution, "diagnostics": graph.diagnostics(), "parser_recovery_files": recovered}),
     })
@@ -292,6 +304,31 @@ mod tests {
     fn noise_label_extracts_stem() {
         let path = Path::new("/project/src/ui/button.tsx");
         assert_eq!(noise_label(path), "button");
+    }
+
+    #[test]
+    fn inertia_follow_declares_conventional_page_resolution_in_text_and_json() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("composer.json"), "{}").unwrap();
+        fs::create_dir_all(dir.path().join("resources/js/pages")).unwrap();
+        fs::write(
+            dir.path().join("resources/js/pages/Home.vue"),
+            "<template>Home</template>",
+        )
+        .unwrap();
+        let controller = dir.path().join("Controller.php");
+        fs::write(
+            &controller,
+            "<?php use Inertia\\Inertia; Inertia::render('Home');",
+        )
+        .unwrap();
+        let report = run(controller.to_str().unwrap(), &follow_config(1)).unwrap();
+        assert_eq!(report.json["resolution"]["resolved"], 1);
+        assert!(report.text.contains("custom page resolvers not evaluated"));
+        assert!(report.json["coverage"]
+            .as_str()
+            .unwrap()
+            .contains("conventional Inertia"));
     }
 
     #[test]

@@ -79,6 +79,25 @@ Xray remains read-only even with a premium licence: rename, code actions and
 `workspace/applyEdit` are not enabled. See the [official initialization options](https://github.com/bmewburn/intelephense-docs/blob/master/installation.md#initialisation-options)
 and the [LSP type hierarchy protocol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_prepareTypeHierarchy).
 
+## Laravel conventions and reverse scans
+
+`--references` on a supported scope or Job/Listener `handle` declaration now
+supplements the exact LSP result with separately labelled convention candidates.
+The top-level `results`/`count`/`status` remain exact-server fields; the optional
+`convention_candidates` object has its own status and warnings. Never combine its
+count with exact references or interpret construction/registration hints as runtime
+callers. Legacy `scopeFoo` and attributed `#[Scope]` declarations are supported;
+name-only matches remain explicitly unverified.
+
+Literal `Inertia\\Inertia::render()` calls expose `inertia:Page` dependencies for
+conventional Vue page roots in outline, follow and reverse lookup. Custom page
+resolvers are not evaluated. `--who` names recovered parser inputs and reuses a
+private metadata-validated parse-fact cache, while enumerating Git-visible files
+and resolving dependencies/configuration fresh on each query.
+
+See [Laravel navigation, bounds and cache scope](laravel-navigation.md) for the
+supported syntax, result fields, candidate limitations and cache failure policy.
+
 ## Language-server lifecycle and limits
 
 On Unix, navigation automatically reuses a private worker for the selected
@@ -158,8 +177,10 @@ for Larastan/PHPStan or application tests.
   scope**, not that all runtime relationships were discovered. `partial`
   identifies parser recovery, incomplete scan, or bounded JSON output. Text
   overflow says `status=truncated`. JSON preserves the pre-truncation status.
-- Failures are explicit and exit nonzero. An empty result has count zero and
-  remains distinct from failure. Output-pipe closure does not cause a panic.
+- Failures are explicit and exit nonzero. An empty exact result has count zero
+  and remains distinct from failure; a separate convention supplement may still
+  contain candidates or its own partial/failed status. Output-pipe closure does
+  not cause a panic.
 
 Digest JSON retains schema version 1 and the existing `file.content` structure;
 new status/coverage fields are additive. Follow and reverse now also support

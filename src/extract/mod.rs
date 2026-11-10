@@ -5,6 +5,7 @@ mod hooks;
 mod jsx;
 mod markdown;
 mod php;
+pub(crate) use php::conventions as php_conventions;
 mod python;
 mod rust;
 mod sql;

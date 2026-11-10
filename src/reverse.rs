@@ -6,9 +6,11 @@ use std::process::Command;
 
 use crate::error::XrayError;
 use crate::lang::{self, LanguageKind};
-use crate::model::FileSymbols;
 use crate::output::FileDigest;
-use crate::{parser, resolve, util};
+use crate::{resolve, util};
+
+#[path = "reverse_cache.rs"]
+mod cache;
 
 /// Show who imports the target file by scanning the project.
 pub fn run(target_path: &str) -> Result<crate::presentation::Report, XrayError> {
@@ -31,7 +33,8 @@ pub fn run(target_path: &str) -> Result<crate::presentation::Report, XrayError> 
     };
     let target_fn_names = extract_target_function_names(&digest);
     let scan = scan_importers(&git_root, &target, path_config.as_ref(), &target_fn_names)?;
-    let status = if scan.skipped.is_empty() && scan.recovered == 0 && !digest.syntax_recovered {
+    let status = if scan.skipped.is_empty() && scan.recovered.is_empty() && !digest.syntax_recovered
+    {
         "complete"
     } else {
         "partial"
@@ -39,9 +42,23 @@ pub fn run(target_path: &str) -> Result<crate::presentation::Report, XrayError> 
     let coverage = if digest.language_kind == LanguageKind::Php {
         "PHP static class/import dependencies; Git-visible PHP files; not runtime callers"
     } else {
-        "static imports; Git-visible supported files; not runtime callers"
+        "static imports + conventional Inertia Vue page links; Git-visible supported files; custom page resolvers not evaluated; not runtime callers"
     };
-    let mut text = format!("{} static dependents status={status} scanned={} skipped={} parser_recovery_files={}\ncoverage: {coverage}\ntarget: {}\n", scan.importers.len(), scan.scanned, scan.skipped.len(), scan.recovered + usize::from(digest.syntax_recovered), digest.display_path);
+    let mut recovered_paths = scan.recovered.clone();
+    if digest.syntax_recovered {
+        recovered_paths.push(
+            target
+                .strip_prefix(&git_root)
+                .unwrap_or(&target)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    recovered_paths.sort();
+    let mut text = format!("{} static dependents status={status} scanned={} skipped={} parser_recovery_files={}\ncoverage: {coverage}\ntarget: {} syntax_recovered={}\n", scan.importers.len(), scan.scanned, scan.skipped.len(), recovered_paths.len(), digest.display_path, digest.syntax_recovered);
+    for path in &recovered_paths {
+        let _ = writeln!(text, "parser_recovery: {path}");
+    }
     for (path, lines) in &scan.importers {
         let _ = writeln!(text, "{path} ({lines} lines)");
     }
@@ -53,7 +70,8 @@ pub fn run(target_path: &str) -> Result<crate::presentation::Report, XrayError> 
         json: serde_json::json!({
             "schema_version":1,"mode":"who","status":status,"coverage":coverage,
             "target":digest.display_path,"count":scan.importers.len(),"scanned":scan.scanned,
-            "parser_recovery_files":scan.recovered,"target_syntax_recovered":digest.syntax_recovered,"skipped":scan.skipped,
+            "parser_recovery_files":scan.recovered.len(),"target_syntax_recovered":digest.syntax_recovered,
+            "parser_recovery_paths":recovered_paths,"skipped":scan.skipped,
             "results":scan.importers.iter().map(|(path,lines)| serde_json::json!({"path":path,"lines":lines})).collect::<Vec<_>>()
         }),
     })
@@ -93,24 +111,11 @@ fn extract_sql_function_name(signature: &str) -> Option<&str> {
     }
 }
 
-/// Check whether any symbol in the file references one of the target functions.
-fn symbols_reference_functions(symbols: &FileSymbols, target_fn_names: &[String]) -> bool {
-    symbols.internals.iter().any(|sym| {
-        sym.calls.iter().any(|call| {
-            call.strip_prefix("fn:").is_some_and(|fn_name| {
-                target_fn_names
-                    .iter()
-                    .any(|t| t.eq_ignore_ascii_case(fn_name))
-            })
-        })
-    })
-}
-
 #[derive(Default)]
 struct ReverseScan {
     importers: Vec<(String, usize)>,
     scanned: usize,
-    recovered: usize,
+    recovered: Vec<String>,
     skipped: Vec<String>,
 }
 
@@ -129,6 +134,25 @@ fn scan_importers(
     target: &Path,
     path_config: Option<&resolve::PathConfig>,
     target_fn_names: &[String],
+) -> Result<ReverseScan, XrayError> {
+    let mut cache = cache::Cache::open();
+    let scan = scan_with_cache(
+        project_root,
+        target,
+        path_config,
+        target_fn_names,
+        &mut cache,
+    )?;
+    cache.save();
+    Ok(scan)
+}
+
+fn scan_with_cache(
+    project_root: &Path,
+    target: &Path,
+    path_config: Option<&resolve::PathConfig>,
+    target_fn_names: &[String],
+    cache: &mut cache::Cache,
 ) -> Result<ReverseScan, XrayError> {
     let mut scan = ReverseScan::default();
     let php_only = is_php_file(target);
@@ -152,25 +176,37 @@ fn scan_importers(
         }
 
         scan.scanned += 1;
-        let parsed = match parser::parse_file(file_path) {
-            Ok(parsed) => parsed,
+        let facts = match cache.facts(file_path) {
+            Ok(facts) => facts,
             Err(error) => {
                 scan.skipped.push(error.to_string());
                 return;
             }
         };
-        if parsed.has_syntax_errors() {
-            scan.recovered += 1;
+        let rel = file_path
+            .strip_prefix(project_root)
+            .unwrap_or(file_path)
+            .to_string_lossy()
+            .into_owned();
+        if facts.recovered {
+            scan.recovered.push(rel.clone());
         }
+        let language_kind = file_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(LanguageKind::for_extension);
+        let Some(language_kind) = language_kind else {
+            return;
+        };
 
         // Strategy 1: file-level include directives (\i, SOURCE, @@)
         // Include bare TS imports because a workspace path alias can look
         // exactly like an external package (for example `@workspace/ui`).
-        let sources = parsed.diagnostic_specifiers();
+        let sources = &facts.specifiers;
         // Resolve each importer with its own nearest config. Reusing the
         // target package's config breaks aliases across monorepo workspaces.
         let directory = file_path.parent().unwrap_or(project_root);
-        let effective_path_config = if parsed.language_kind.uses_ts_path_config() {
+        let effective_path_config = if language_kind.uses_ts_path_config() {
             configs
                 .entry(directory.to_path_buf())
                 .or_insert_with(|| resolve::load_path_config(directory))
@@ -179,17 +215,17 @@ fn scan_importers(
         } else {
             None
         };
-        let php_paths = (parsed.language_kind == LanguageKind::Php).then(|| {
+        let php_paths = (language_kind == LanguageKind::Php).then(|| {
             php_configs
                 .entry(directory.to_path_buf())
                 .or_insert_with(|| resolve::PhpPaths::load(directory))
         });
 
-        for specifier in &sources {
+        for specifier in sources {
             let resolved = php_paths.as_ref().map_or_else(
                 || {
                     resolve_source_specifier(
-                        parsed.language_kind,
+                        language_kind,
                         specifier,
                         file_path,
                         effective_path_config,
@@ -204,36 +240,27 @@ fn scan_importers(
             let Ok(resolved_canonical) = resolved.canonicalize() else {
                 continue;
             };
-            if dependency_matches_target(parsed.language_kind, &resolved_canonical, target) {
-                let rel = file_path
-                    .strip_prefix(project_root)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .into_owned();
-                let lines = parsed.source.lines().count();
-                scan.importers.push((rel, lines));
+            if dependency_matches_target(language_kind, &resolved_canonical, target) {
+                scan.importers.push((rel, facts.lines));
                 return; // already matched, skip strategy 2
             }
         }
 
         // Strategy 2: semantic function references (SQL only).
         // When the target defines SQL functions, also match files that call them.
-        if !target_fn_names.is_empty() && parsed.language_kind == LanguageKind::Sql {
-            if let crate::model::FileContent::Code(file_symbols) = parsed.extract_content() {
-                if symbols_reference_functions(&file_symbols, target_fn_names) {
-                    let rel = file_path
-                        .strip_prefix(project_root)
-                        .unwrap_or(file_path)
-                        .to_string_lossy()
-                        .into_owned();
-                    let lines = parsed.source.lines().count();
-                    scan.importers.push((rel, lines));
-                }
-            }
+        if language_kind == LanguageKind::Sql
+            && facts.sql_calls.iter().any(|call| {
+                target_fn_names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(call))
+            })
+        {
+            scan.importers.push((rel, facts.lines));
         }
     })?;
 
     scan.importers.sort_by(|a, b| a.0.cmp(&b.0));
+    scan.recovered.sort();
     Ok(scan)
 }
 
@@ -364,6 +391,170 @@ fn should_skip_dir(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn cached_scan(root: &Path, target: &Path) -> (ReverseScan, usize, usize) {
+        let mut cache = cache::Cache::at(Some(root.join(".test-cache")));
+        let scan = scan_with_cache(root, target, None, &[], &mut cache).unwrap();
+        let counts = (cache.hits, cache.misses);
+        cache.save();
+        (scan, counts.0, counts.1)
+    }
+
+    fn git_init(root: &Path) {
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[test]
+    fn inertia_reverse_facts_stay_fresh_when_a_page_appears_or_becomes_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_init(root);
+        fs::write(root.join("composer.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("resources/js/pages")).unwrap();
+        let page = root.join("resources/js/pages/Home.vue");
+        fs::write(&page, "<template>Home</template>").unwrap();
+        fs::write(
+            root.join("Controller.php"),
+            "<?php use Inertia\\Inertia; Inertia::render('Home');",
+        )
+        .unwrap();
+        let (cold, _, misses) = cached_scan(root, &page);
+        assert_eq!(cold.importers, [("Controller.php".into(), 1)]);
+        assert!(misses > 0);
+        let (warm, hits, misses) = cached_scan(root, &page);
+        assert_eq!(warm.importers, cold.importers);
+        assert!(hits > 0);
+        assert_eq!(misses, 0);
+        fs::create_dir_all(root.join("resources/js/Pages")).unwrap();
+        fs::write(
+            root.join("resources/js/Pages/Home.vue"),
+            "<template>Duplicate</template>",
+        )
+        .unwrap();
+        let (ambiguous, hits, _) = cached_scan(root, &page);
+        assert!(ambiguous.importers.is_empty());
+        assert!(hits > 0);
+        fs::remove_file(root.join("resources/js/Pages/Home.vue")).unwrap();
+        assert_eq!(cached_scan(root, &page).0.importers, cold.importers);
+    }
+
+    #[test]
+    fn warm_scan_reenumerates_additions_deletions_and_ignore_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_init(root);
+        let target = root.join("target.ts");
+        fs::write(&target, "export {};").unwrap();
+        fs::write(root.join("a.ts"), "import './target';").unwrap();
+        let (cold, hits, misses) = cached_scan(root, &target);
+        assert_eq!((cold.importers.len(), hits, misses), (1, 0, 1));
+        let (warm, hits, misses) = cached_scan(root, &target);
+        assert_eq!((warm.importers.len(), hits, misses), (1, 1, 0));
+        fs::write(root.join("b.ts"), "import './target';").unwrap();
+        let (added, hits, misses) = cached_scan(root, &target);
+        assert_eq!((added.importers.len(), hits, misses), (2, 1, 1));
+        fs::remove_file(root.join("b.ts")).unwrap();
+        assert_eq!(cached_scan(root, &target).0.importers.len(), 1);
+        fs::write(root.join(".gitignore"), "a.ts\n").unwrap();
+        assert!(cached_scan(root, &target).0.importers.is_empty());
+        fs::write(root.join(".gitignore"), "").unwrap();
+        assert_eq!(cached_scan(root, &target).0.importers.len(), 1);
+        fs::write(root.join("a.ts"), "export const changed = true;").unwrap();
+        let (edited, hits, misses) = cached_scan(root, &target);
+        assert_eq!((edited.importers.len(), hits, misses), (0, 0, 1));
+    }
+
+    #[test]
+    fn warm_scan_resolves_changed_tsconfig_without_reparsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir(root.join("other")).unwrap();
+        let target = root.join("src/target.ts");
+        fs::write(&target, "export {};").unwrap();
+        fs::write(root.join("other/target.ts"), "export {};").unwrap();
+        fs::write(root.join("consumer.ts"), "import '@local/target';").unwrap();
+        let config = root.join("tsconfig.json");
+        fs::write(
+            &config,
+            r#"{"compilerOptions":{"paths":{"@local/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(cached_scan(root, &target).0.importers.len(), 1);
+        fs::write(
+            &config,
+            r#"{"compilerOptions":{"paths":{"@local/*":["other/*"]}}}"#,
+        )
+        .unwrap();
+        let (scan, hits, misses) = cached_scan(root, &target);
+        assert_eq!((scan.importers.len(), hits, misses), (0, 2, 0));
+    }
+
+    #[test]
+    fn warm_scan_resolves_changed_composer_without_reparsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir(root.join("other")).unwrap();
+        let target = root.join("src/Target.php");
+        fs::write(&target, "<?php namespace App; class Target {}").unwrap();
+        fs::write(
+            root.join("other/Target.php"),
+            "<?php namespace App; class Target {}",
+        )
+        .unwrap();
+        fs::write(root.join("Consumer.php"), "<?php use App\\Target;").unwrap();
+        let config = root.join("composer.json");
+        fs::write(&config, r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#).unwrap();
+        assert_eq!(cached_scan(root, &target).0.importers.len(), 1);
+        fs::write(&config, r#"{"autoload":{"psr-4":{"App\\":"other/"}}}"#).unwrap();
+        let (scan, hits, misses) = cached_scan(root, &target);
+        assert_eq!((scan.importers.len(), hits, misses), (0, 2, 0));
+    }
+
+    #[test]
+    fn warm_scan_preserves_recovered_paths_and_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let target = root.join("target.ts");
+        fs::write(&target, "export {};").unwrap();
+        fs::write(root.join("recovered.ts"), "const invalid = ;").unwrap();
+        fs::write(root.join("unreadable.ts"), [0xff]).unwrap();
+        for _ in 0..2 {
+            let scan = cached_scan(root, &target).0;
+            assert_eq!(scan.recovered, ["recovered.ts"]);
+            assert_eq!(scan.skipped.len(), 1);
+            assert!(scan.skipped[0].contains("unreadable.ts"));
+            assert!(scan.importers.is_empty());
+        }
+    }
+
+    #[test]
+    fn recovery_report_names_target_and_non_importing_recovered_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_init(root);
+        let target = root.join("target.ts");
+        fs::write(&target, "export const broken = ;").unwrap();
+        fs::write(root.join("unrelated.ts"), "const broken = ;").unwrap();
+        let report = run(target.to_str().unwrap()).unwrap();
+        assert_eq!(report.json["status"], "partial");
+        assert_eq!(report.json["parser_recovery_files"], 1);
+        assert_eq!(report.json["target_syntax_recovered"], true);
+        assert_eq!(
+            report.json["parser_recovery_paths"],
+            serde_json::json!(["target.ts", "unrelated.ts"])
+        );
+        assert!(report.text.contains("parser_recovery_files=2"));
+        assert!(report.text.contains("syntax_recovered=true"));
+        assert!(report.text.contains("parser_recovery: target.ts"));
+        assert!(report.text.contains("parser_recovery: unrelated.ts"));
+    }
 
     #[test]
     fn should_skip_dir_skips_node_modules() {

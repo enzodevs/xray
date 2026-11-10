@@ -25,6 +25,8 @@ Output is designed for agents: compact text or JSON, explicit scope/status, and 
 - **Cross-file call traces:** start from one handler or method and follow the path through the project.
 - **Reverse dependencies:** find static file dependents (including same-namespace PHP class references), not runtime callers.
 - **Exact PHP navigation:** query Intelephense definitions, references, implementations, type definitions, declarations, and direct type hierarchies at a source position.
+- **Laravel navigation:** follow literal Inertia render calls to conventional Vue pages; inspect separately labelled scope and Job/Listener candidates without confusing them with exact references.
+- **Faster reverse scans:** reuse private per-file parse facts while refreshing Git visibility and dependency resolution; partial scans name every parser-recovered file.
 - **Frontend structure:** React hooks and JSX trees, plus Vue and Svelte component structure.
 - **Machine-readable output:** compact JSON for digests, dependency trees, reverse lookup, and position-based navigation; oversized results remain valid JSON with recoverable evidence.
 
@@ -159,6 +161,8 @@ TypeScript and Composer configurations are reused per source directory during re
 | Bound context | `xray --max-bytes 4096 FILE` | Caps stdout; saves exact overflow privately |
 
 Position-based navigation requires exactly one PHP file and `--at LINE:COL` (one-based line and UTF-8 byte column), and uses LSP automatically. All seven navigation modes support `--format json` and bounded output with exact overflow recovery. The five premium modes require Intelephense premium support; definitions and references remain free. Hierarchy modes report direct relationships only, not a transitive hierarchy; `--depth` does not apply. Results describe the server's static index, never runtime completeness, and these operations do not modify source files.
+
+For Laravel, `--references` on a scope or framework-handler declaration can add a separate `convention_candidates` section. Its matches are **not exact LSP references or proof of runtime dispatch**. See [supported conventions and reverse-cache behavior](docs/laravel-navigation.md).
 
 You can pass more than one file to the regular text modes:
 

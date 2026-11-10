@@ -207,3 +207,78 @@ SHA-256 match: `6449b0b29a8563f7ddc5443902d8b1478b62c4cdf974dde18a89f978924b7d0c
 
 Local temporary evidence: `/tmp/xray-premium-{tests,clippy,build}.log`,
 `/tmp/xray-premium-validation/`, and `/tmp/xray-premium-verify.py`.
+
+## Laravel conventions, Inertia links and warm reverse scans
+
+Baseline: `850aece`. All five additions were validated read-only on
+`/home/rrghost/SoftEng/redapro/redapro-whitelabel`. Existing application changes
+were left untouched; no PHP/Artisan/Composer or application JavaScript was
+executed. The configured Fluxomind directory was unavailable. Temporary sources
+were used only by unit tests, not by real-project smoke checks.
+
+- `cargo test`: **457 passed, 1 ignored** unit tests; **15 passed** CLI tests.
+- `cargo clippy --all-targets -- -D warnings`, release build and diff checks passed.
+- New tests cover Inertia facade aliases/literals, namespace scope, dynamic
+  noncoverage, ambiguity, missing pages and path/symlink escape rejection.
+- Reverse-cache tests cover cold/warm facts, source edits/addition/removal,
+  ignore changes, Composer/TS config changes, Inertia target ambiguity, parser
+  recovery, read errors, incompatible/corrupt snapshots and unsafe cache paths.
+- Convention tests cover scopes and attributed scopes, aliases, comments and
+  strings, static receiver hints, handler construction/dispatch, listener event
+  unions and commented parameters. Exact and supplementary result counts remain
+  distinct, including through bounded JSON artifact recovery.
+- Focused review identified per-file extraction limits, oversized supplemental
+  transport data and comments before listener parameters as gaps. Fixes stream
+  candidates with count/byte/deadline checks, use parser cancellation, bound
+  receiver-chain inspection, preserve exact results if supplements exceed the
+  worker envelope, and skip comments when identifying the event parameter.
+  Regression tests cover the fixes; intermediate compile/lint/format issues were
+  resolved before the final successful checks.
+
+### Real outcomes and measurements
+
+Cold/warm `--who` comparisons used isolated disposable cache directories rather
+than deleting the user's cache. Complete JSON (recovering overflow when needed)
+was **identical** across each cold/warm pair, including partial/recovery evidence.
+
+| Case | First query | Warm query | Result |
+|---|---:|---:|---|
+| `--who app/Models/User.php` | **3.921 s** | **0.300 s** | 507 dependents; 3,071 files scanned; partial with 2 named recovery paths |
+| `--who resources/js/pages/Dashboard.vue` | **6.788 s** | **0.631 s** | Controller now found; 5,160 files scanned; partial with 6 named recovery paths |
+| Dashboard controller outline | **0.004 s** | — | Includes `inertia:Dashboard` |
+| Dashboard controller follow | **0.033 s** | — | Conventional Vue page resolves; complete |
+| Profile controller follow | **0.025 s** | — | `inertia:settings/Profile` resolves; complete |
+
+The six whole-workspace recovery paths are now present in text and JSON rather
+than only counted. They include two PHP inputs, two SQL schema files and two Vue
+components. The paths were checked locally; parser recovery is not a claim that
+those files fail their native language/compiler. This change names the remaining
+coverage limitation rather than hiding it or changing partial to complete.
+
+| Reference query on a declaration | Time | Exact LSP references | Separate convention candidates |
+|---|---:|---:|---|
+| Legacy `scopeForSchool` on the message model; cold LSP worker | **15.341 s** | 0 | 254: **6 same-class literal receiver hints**, 248 unverified name matches |
+| Attributed `#[Scope]` method | **0.200 s** | 0 | 2 name matches |
+| Communication Job `handle` | **1.975 s** | 4 | 4 constructions, explicitly not claimed as dispatch |
+| Listener `handle` | **1.989 s** | 0 | 3 event-dispatch candidates |
+| Trail-generation Job `handle` | **2.326 s** | 0 | 7 candidates, including **2 static dispatch helpers** |
+
+All candidate ranges were checked against the actual source bytes. The first
+four reference queries also exercised a **1,024-byte JSON budget** and exact
+private artifact recovery. The premium implementation query still returned the
+three payment gateway classes (**0.118 s**); ordinary non-conventional queries
+have no candidate supplement. These observations do not validate receiver types,
+listener registration, dynamic bindings or runtime dispatch.
+
+The global binary at `/home/rrghost/.local/bin/xray` was atomically replaced with
+the verified release. SHA-256 matches:
+`0e5f169007889ae43a83c0c1fd42555858d347cc4b9fd2a6dcc5307c00c60f48`.
+A global-PATH `--who` smoke check found the Dashboard controller and retained all
+six recovery paths (**6.92 s** on its first reverse-cache pass, **0.651 s** warm,
+identical JSON). A global-PATH Job-reference query also passed with 0 exact
+references and 7 separately labelled candidates (**15.119 s**, cold LSP worker).
+
+Local temporary evidence: `/tmp/xray-laravel-{tests,clippy,build,format}.log`,
+`/tmp/xray-laravel-validation/`, and `/tmp/xray-laravel-verify.py`. The full result
+artifacts and private application source are not repository fixtures. See
+[the Laravel navigation contract](laravel-navigation.md) for precise coverage.

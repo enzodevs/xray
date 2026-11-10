@@ -8,6 +8,7 @@ const PHP_EXTENSIONS: &[&str] = &["php", "inc"];
 #[derive(Default)]
 pub(crate) struct PhpPaths {
     mappings: Vec<(String, Vec<PathBuf>)>,
+    root: Option<PathBuf>,
 }
 
 impl PhpPaths {
@@ -51,7 +52,10 @@ impl PhpPaths {
             }
         }
         mappings.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
-        Some(Self { mappings })
+        Some(Self {
+            mappings,
+            root: Some(root.to_path_buf()),
+        })
     }
 
     pub(crate) fn matches(&self, specifier: &str) -> bool {
@@ -59,6 +63,40 @@ impl PhpPaths {
         self.mappings
             .iter()
             .any(|(prefix, _)| name.starts_with(prefix))
+    }
+
+    /// Static Laravel/Inertia Vue convention, not a JavaScript resolver evaluator.
+    /// Both Vite default directory spellings are allowed; duplicate matches are unresolved.
+    /// Custom page roots, transforms and non-Vue extensions are not supported.
+    fn resolve_inertia_page(&self, page: &str) -> Option<PathBuf> {
+        if page.is_empty()
+            || page.contains(['\\', ':'])
+            || page.chars().any(char::is_control)
+            || page.split('/').any(|part| matches!(part, "" | "." | ".."))
+        {
+            return None;
+        }
+        let root = self.root.as_ref()?.canonicalize().ok()?;
+        let mut resolved = None;
+        for directory in ["resources/js/pages", "resources/js/Pages"] {
+            let Ok(page_root) = root.join(directory).canonicalize() else {
+                continue;
+            };
+            // Neither a symlinked root nor a nested symlink may escape its boundary.
+            if !page_root.starts_with(&root) {
+                continue;
+            }
+            let candidate = page_root.join(format!("{page}.vue"));
+            if !candidate.is_file() {
+                continue;
+            }
+            let candidate = candidate.canonicalize().ok()?;
+            if !candidate.starts_with(&page_root) || resolved.is_some() {
+                return None;
+            }
+            resolved = Some(candidate);
+        }
+        resolved
     }
 
     fn resolve(&self, specifier: &str) -> Option<PathBuf> {
@@ -89,6 +127,9 @@ pub(crate) fn resolve_php_import_with_paths(
     paths: &PhpPaths,
 ) -> Option<PathBuf> {
     let from_dir = from_file.parent()?;
+    if let Some(page) = specifier.strip_prefix("inertia:") {
+        return paths.resolve_inertia_page(page);
+    }
     let specifier = specifier.trim();
     if specifier.is_empty() {
         return None;
@@ -154,6 +195,101 @@ fn search_roots(from_dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inertia_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("composer.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.path().join("app/Http")).unwrap();
+        dir
+    }
+
+    fn page(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "<template>Page</template>").unwrap();
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn inertia_pages_resolve_exact_case_in_either_conventional_root() {
+        for directory in ["pages", "Pages"] {
+            let dir = inertia_project();
+            let expected = page(
+                dir.path(),
+                &format!("resources/js/{directory}/school/Home.vue"),
+            );
+            let from = dir.path().join("app/Http/Controller.php");
+            assert_eq!(
+                resolve_php_import("inertia:school/Home", &from),
+                Some(expected)
+            );
+            for missing in [
+                "inertia:school/home",
+                "inertia:Missing",
+                "inertia:school/Home.vue",
+                "inertia:school/Home ",
+            ] {
+                assert!(resolve_php_import(missing, &from).is_none(), "{missing}");
+            }
+        }
+    }
+
+    #[test]
+    fn inertia_ambiguous_roots_and_custom_roots_are_unresolved() {
+        let dir = inertia_project();
+        page(dir.path(), "resources/js/pages/Home.vue");
+        page(dir.path(), "resources/js/Pages/Home.vue");
+        page(dir.path(), "resources/js/custom/Custom.vue");
+        let from = dir.path().join("app/Http/Controller.php");
+        assert!(resolve_php_import("inertia:Home", &from).is_none());
+        assert!(resolve_php_import("inertia:Custom", &from).is_none());
+    }
+
+    #[test]
+    fn inertia_does_not_escape_page_root_or_search_parent_composer_projects() {
+        let dir = inertia_project();
+        page(dir.path(), "resources/js/pages/Home.vue");
+        page(dir.path(), "resources/js/Secret.vue");
+        let from = dir.path().join("app/Http/Controller.php");
+        for invalid in [
+            "",
+            "../Secret",
+            "./Home",
+            "school/../../Secret",
+            "/Home",
+            "C:/Home",
+            "school\\Home",
+            "school//Home",
+            "Home/",
+            "Home\n",
+        ] {
+            assert!(
+                resolve_php_import(&format!("inertia:{invalid}"), &from).is_none(),
+                "{invalid:?}"
+            );
+        }
+        let nested = dir.path().join("packages/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("composer.json"), "{}").unwrap();
+        assert!(resolve_php_import("inertia:Home", &nested.join("Controller.php")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inertia_rejects_symlink_escape() {
+        let dir = inertia_project();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = page(outside.path(), "Secret.vue");
+        let root = dir.path().join("resources/js/pages");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("Leak.vue")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("nested")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("resources/js/Pages")).unwrap();
+        let from = dir.path().join("app/Http/Controller.php");
+        for invalid in ["inertia:Leak", "inertia:nested/Secret", "inertia:Secret"] {
+            assert!(resolve_php_import(invalid, &from).is_none(), "{invalid}");
+        }
+    }
 
     #[test]
     fn resolve_relative_php_file() {

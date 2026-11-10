@@ -256,7 +256,7 @@ pub(super) fn run(root: &Path) -> Result<(), XrayError> {
                 .query(&root, &request)
         });
         let reply = match result {
-            Ok(result) => Reply::Success(result),
+            Ok(result) => success_reply(result, MAX_MESSAGE),
             Err(error) => {
                 // A timeout/protocol failure may desynchronize the server; never reuse it.
                 workspace = None;
@@ -266,6 +266,33 @@ pub(super) fn run(root: &Path) -> Result<(), XrayError> {
         let _ = send(&mut stream, &reply, deadline);
     }
     Ok(())
+}
+
+// Supplemental heuristics must never crowd exact LSP locations out of the transport.
+fn success_reply(result: NavigationResult, limit: usize) -> Reply {
+    let mut reply = Reply::Success(result);
+    let fits = |reply: &Reply| serde_json::to_vec(reply).is_ok_and(|bytes| bytes.len() <= limit);
+    if fits(&reply) {
+        return reply;
+    }
+    if let Reply::Success(result) = &mut reply {
+        if let Some(supplement) = result.conventions.as_mut() {
+            supplement.omitted += supplement.results.len();
+            supplement.count = 0;
+            supplement.results.clear();
+            supplement.parser_recovery_files.clear();
+            supplement.target_class = supplement.target_class.chars().take(256).collect();
+            supplement.status = "partial".into();
+            supplement.warnings = vec![
+                "convention payload omitted at worker limit; exact LSP results preserved".into(),
+            ];
+        }
+    }
+    if fits(&reply) {
+        reply
+    } else {
+        Reply::Failure("exact navigation result exceeds worker message limit".into())
+    }
 }
 
 fn wait_for_connection(
@@ -358,6 +385,52 @@ fn read_exact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_conventions_cannot_displace_exact_locations() {
+        use crate::navigation::{ConventionCandidate, ConventionResult, NavigationLocation};
+        let location = || NavigationLocation {
+            file: "/tmp/source.php".into(),
+            line: 1,
+            column: 1,
+            end_line: 1,
+            end_column: 2,
+        };
+        let result = NavigationResult {
+            locations: vec![location()],
+            provenance: "lsp:intelephense".into(),
+            readiness: "ready".into(),
+            warnings: Vec::new(),
+            conventions: Some(Box::new(ConventionResult {
+                kind: "eloquent-scope".into(),
+                target_class: "App\\Models\\X".into(),
+                status: "complete".into(),
+                coverage: "candidates only".into(),
+                count: 1,
+                omitted: 0,
+                scanned: 1,
+                parser_recovery_files: Vec::new(),
+                warnings: Vec::new(),
+                results: vec![ConventionCandidate {
+                    kind: "scope-name-match".into(),
+                    subject: "x".repeat(5000),
+                    provenance: "syntax:laravel-convention-candidate".into(),
+                    location: location(),
+                }],
+            })),
+        };
+        let reply = success_reply(result, 2048);
+        assert!(serde_json::to_vec(&reply).unwrap().len() <= 2048);
+        let Reply::Success(result) = reply else {
+            panic!("lost exact results");
+        };
+        assert_eq!(result.locations.len(), 1);
+        let supplement = result.conventions.unwrap();
+        assert_eq!(supplement.status, "partial");
+        assert_eq!(supplement.omitted, 1);
+        assert_eq!(supplement.count, 0);
+        assert!(!supplement.warnings.is_empty());
+    }
 
     #[test]
     fn licence_activation_and_replacement_change_session_identity_without_reading_key() {

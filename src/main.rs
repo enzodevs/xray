@@ -11,6 +11,8 @@ mod navigation;
 mod output;
 mod parser;
 #[cfg(unix)]
+mod php_conventions;
+#[cfg(unix)]
 mod php_workspace;
 mod presentation;
 mod project;
@@ -413,6 +415,50 @@ fn render_navigation_report(
             location.end_column
         );
     }
+    if let Some(candidates) = &result.conventions {
+        let _ = writeln!(
+            text,
+            "convention_candidates={} status={} kind={} target_class={} scanned={}",
+            candidates.count,
+            candidates.status,
+            candidates.kind,
+            candidates.target_class,
+            candidates.scanned
+        );
+        let _ = writeln!(text, "candidate_coverage={}", candidates.coverage);
+        if candidates.omitted > 0 {
+            let _ = writeln!(
+                text,
+                "candidate_omitted={} (worker payload limit; exact LSP results preserved)",
+                candidates.omitted
+            );
+        }
+        for candidate in &candidates.results {
+            let location = &candidate.location;
+            let display = root
+                .as_ref()
+                .and_then(|root| location.file.strip_prefix(root).ok())
+                .unwrap_or(&location.file);
+            let _ = writeln!(
+                text,
+                "candidate[{}] {}:{}:{}-{}:{} subject={} provenance={}",
+                candidate.kind,
+                display.display(),
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+                candidate.subject,
+                candidate.provenance
+            );
+        }
+        for file in &candidates.parser_recovery_files {
+            let _ = writeln!(text, "candidate_parser_recovery: {}", file.display());
+        }
+        for warning in &candidates.warnings {
+            let _ = writeln!(text, "candidate_warning: {warning}");
+        }
+    }
     for warning in &result.warnings {
         let _ = writeln!(text, "warning: {warning}");
     }
@@ -425,7 +471,7 @@ fn render_navigation_report(
         json: serde_json::json!({"schema_version":1,"mode":mode,"status":status,
         "coverage":coverage, "position_encoding":"utf-8-bytes-1-based",
         "query":{"file":path,"line":line,"column":column},"count":result.locations.len(),
-        "provenance":result.provenance,"readiness":result.readiness,"warnings":result.warnings,"results":result.locations}),
+        "provenance":result.provenance,"readiness":result.readiness,"warnings":result.warnings,"results":result.locations,"convention_candidates":result.conventions}),
     })
 }
 
@@ -642,6 +688,59 @@ mod tests {
         assert_eq!(args.at, Some((126, 52)));
     }
 
+    #[test]
+    fn convention_candidates_do_not_become_exact_references_and_survive_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Model.php");
+        std::fs::write(&file, "<?php class Model {}\n").unwrap();
+        let result = navigation::NavigationResult {
+            locations: Vec::new(),
+            provenance: "lsp:intelephense".into(),
+            readiness: "ready".into(),
+            warnings: Vec::new(),
+            conventions: Some(Box::new(navigation::ConventionResult {
+                kind: "eloquent-scope".into(),
+                target_class: "App\\Models\\Model".into(),
+                status: "complete".into(),
+                coverage: "name-only candidates; receiver types unverified".into(),
+                count: 100,
+                omitted: 0,
+                scanned: 100,
+                parser_recovery_files: Vec::new(),
+                warnings: Vec::new(),
+                results: (1..=100)
+                    .map(|line| navigation::ConventionCandidate {
+                        kind: "scope-name-match".into(),
+                        subject: "active".into(),
+                        provenance: "syntax:laravel-convention-candidate".into(),
+                        location: navigation::NavigationLocation {
+                            file: file.clone(),
+                            line,
+                            column: 1,
+                            end_line: line,
+                            end_column: 7,
+                        },
+                    })
+                    .collect(),
+            })),
+        };
+        let report =
+            render_navigation_report(file.to_str().unwrap(), 1, 1, "references", &result).unwrap();
+        assert_eq!(report.json["status"], "empty");
+        assert_eq!(report.json["count"], 0);
+        assert_eq!(report.json["results"], serde_json::json!([]));
+        assert_eq!(report.json["convention_candidates"]["count"], 100);
+        assert!(report.text.contains("candidate[scope-name-match]"));
+        let bounded = presentation::bounded_json(report.json.clone(), 1024).unwrap();
+        assert!(bounded.len() <= 1024);
+        let preview: serde_json::Value = serde_json::from_str(&bounded).unwrap();
+        let artifact = Path::new(preview["truncation"]["artifact"].as_str().unwrap());
+        let recovered: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifact).unwrap()).unwrap();
+        assert_eq!(recovered, report.json);
+        std::fs::remove_dir_all(artifact.parent().unwrap()).unwrap();
+    }
+
     const PREMIUM_MODES: [(&str, Mode); 5] = [
         ("--implementations", Mode::Implementations),
         ("--type-definition", Mode::TypeDefinition),
@@ -713,6 +812,7 @@ mod tests {
             provenance: "lsp:intelephense".into(),
             readiness: "ready".into(),
             warnings: Vec::new(),
+            conventions: None,
         };
         for (flag, _) in PREMIUM_MODES {
             let mode = &flag[2..];

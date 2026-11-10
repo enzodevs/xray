@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Instant;
 
 use markdown::{Constructs, ParseOptions};
 use tree_sitter::{Language, Parser, Tree};
@@ -27,12 +28,25 @@ pub fn detect_language(ext: &str) -> Result<Language, XrayError> {
 
 /// Read and parse a source file, returning parsed tree, source, and ecosystem.
 pub fn parse_file(path: &Path) -> Result<ParsedFile, XrayError> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let source = std::fs::read_to_string(path).map_err(|e| XrayError::Io {
         path: path.display().to_string(),
         source: e,
     })?;
 
+    parse_source(path, source, None)
+}
+
+/// Parse already bounded/read source without reopening a potentially changing file.
+pub(crate) fn parse_source(
+    path: &Path,
+    source: String,
+    deadline: Option<Instant>,
+) -> Result<ParsedFile, XrayError> {
+    let expired = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
+    if expired() {
+        return Err(XrayError::ParseFailed("parse deadline exceeded".into()));
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let language_kind = LanguageKind::from_extension(ext)?;
     let content = match language_kind {
         LanguageKind::Md => ParsedContent::Markdown(
@@ -53,13 +67,37 @@ pub fn parse_file(path: &Path) -> Result<ParsedFile, XrayError> {
                 .set_language(&language)
                 .map_err(|e| XrayError::ParseFailed(e.to_string()))?;
 
-            let tree = parser
-                .parse(&source, None)
-                .ok_or_else(|| XrayError::ParseFailed(path.display().to_string()))?;
+            let tree = if deadline.is_some() {
+                let mut progress = |_: &tree_sitter::ParseState| {
+                    if expired() {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                };
+                let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress);
+                parser.parse_with_options(
+                    &mut |offset, _| &source.as_bytes()[offset..],
+                    None,
+                    Some(options),
+                )
+            } else {
+                parser.parse(&source, None)
+            }
+            .ok_or_else(|| {
+                XrayError::ParseFailed(if expired() {
+                    "parse deadline exceeded".into()
+                } else {
+                    path.display().to_string()
+                })
+            })?;
             ParsedContent::Code(tree)
         }
     };
 
+    if expired() {
+        return Err(XrayError::ParseFailed("parse deadline exceeded".into()));
+    }
     Ok(ParsedFile {
         language_kind,
         content,
